@@ -101,6 +101,7 @@ pub struct ValeManager {
     pub arch: String,
 
     pub fallback_exe: PathBuf,
+    pub custom_exe: Option<PathBuf>,
 }
 
 // ValeManager manages the installation and execution of Vale.
@@ -113,6 +114,15 @@ impl ValeManager {
     // The ValeManager will attempt to use the managed version of Vale, but
     // will fall back to the system version if it's not available.
     pub fn new() -> ValeManager {
+        ValeManager::with_custom_binary(None)
+    }
+
+    // `with_custom_binary` creates a new ValeManager with an optional custom binary path.
+    //
+    // If `custom_binary` is provided, it will be used as the highest priority Vale executable.
+    // Otherwise, the ValeManager will attempt to use the managed version of Vale, but
+    // will fall back to the system version if it's not available.
+    pub fn with_custom_binary(custom_binary: Option<PathBuf>) -> ValeManager {
         let arch = vale_arch();
 
         let fallback = which("vale").unwrap_or(PathBuf::from(""));
@@ -133,10 +143,14 @@ impl ValeManager {
             args: vec!["--output=JSON".to_string()],
             arch,
             fallback_exe: fallback,
+            custom_exe: custom_binary,
         }
     }
 
     pub(crate) fn is_installed(&self) -> bool {
+        if let Some(ref custom) = self.custom_exe {
+            return custom.exists();
+        }
         self.managed_exe.exists() || self.fallback_exe.exists()
     }
 
@@ -284,6 +298,13 @@ impl ValeManager {
     }
 
     fn exe_path(&self, managed: bool) -> Result<PathBuf, Error> {
+        // Priority order: custom binary -> managed binary -> fallback binary
+        if let Some(ref custom) = self.custom_exe {
+            if custom.exists() {
+                return Ok(custom.clone());
+            }
+        }
+        
         if self.managed_exe.exists() {
             return Ok(self.managed_exe.clone());
         } else if self.fallback_exe.exists() && !managed {

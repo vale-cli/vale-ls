@@ -264,7 +264,8 @@ impl LanguageServer for Backend {
         let context = rope.line(position.line as usize);
         let line = context.as_str().to_owned().unwrap_or("");
 
-        let config = self.cli.config(self.config_path(), self.root_path());
+        let cli = self.get_vale_manager();
+        let config = cli.config(self.config_path(), self.root_path());
         if config.is_err() {
             return Ok(None);
         }
@@ -320,7 +321,8 @@ impl LanguageServer for Backend {
         }
 
         let s = serde_json::to_string(diagnostics.unwrap()).unwrap();
-        match self.cli.fix(&s) {
+        let cli = self.get_vale_manager();
+        match cli.fix(&s) {
             Ok(fixed) => {
                 let alert: vale::ValeAlert = serde_json::from_str(&s).unwrap();
                 let mut range = utils::alert_to_range(alert.clone());
@@ -381,12 +383,12 @@ impl Backend {
         let uri = params.uri.clone();
         let fp = uri.to_file_path();
 
-        let has_cli = self.cli.is_installed();
+        let cli = self.get_vale_manager();
+        let has_cli = cli.is_installed();
 
         self.update(params.clone());
         if has_cli && fp.is_ok() {
-            match self
-                .cli
+            match cli
                 .run(fp.unwrap(), self.config_path(), self.config_filter())
             {
                 Ok(result) => {
@@ -490,6 +492,17 @@ impl Backend {
         None
     }
 
+    fn get_vale_manager(&self) -> vale::ValeManager {
+        let custom_binary = self.get_string("valeBinaryPath");
+        if !custom_binary.is_empty() {
+            let custom_path = std::path::PathBuf::from(custom_binary);
+            vale::ValeManager::with_custom_binary(Some(custom_path))
+        } else {
+            // Fall back to the default ValeManager stored in self.cli
+            self.cli.clone()
+        }
+    }
+
     fn update(&self, params: TextDocumentItem) {
         let uri = params.uri.clone();
         if self.get_ext(uri) != "" {
@@ -504,7 +517,8 @@ impl Backend {
         if uri.path().contains(".vale.ini") {
             return "ini".to_string();
         } else if ext == "yml" {
-            let config = self.cli.config(self.config_path(), self.root_path());
+            let cli = self.get_vale_manager();
+            let config = cli.config(self.config_path(), self.root_path());
             if config.is_ok() {
                 let styles = config.unwrap().styles_path;
                 let p = styles::StylesPath::new(styles);
@@ -517,7 +531,8 @@ impl Backend {
     }
 
     async fn do_sync(&self) {
-        match self.cli.sync(self.config_path(), self.root_path()) {
+        let cli = self.get_vale_manager();
+        match cli.sync(self.config_path(), self.root_path()) {
             Ok(_) => {
                 self.client
                     .show_message(MessageType::INFO, "Successfully synced Vale config.")
@@ -553,7 +568,8 @@ impl Backend {
             return;
         }
 
-        let resp = self.cli.upload_rule(
+        let cli = self.get_vale_manager();
+        let resp = cli.upload_rule(
             self.config_path(),
             self.root_path(),
             uri.to_str().unwrap().to_string(),
