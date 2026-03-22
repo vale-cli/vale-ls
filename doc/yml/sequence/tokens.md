@@ -8,3 +8,10 @@ tokens:
 ```
 
 A list of tokens with associated NLP metadata.
+
+Supported token fields are:
+
+- `pattern`: a regex pattern matched against token text.
+- `tag`: a POS-tag pattern (for example, `NN|NNS`).
+- `skip`: number of optional positions before this token.
+- `negate`: invert `pattern`/`tag` matching.
