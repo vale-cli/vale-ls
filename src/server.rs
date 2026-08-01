@@ -1,3 +1,5 @@
+use std::env;
+
 use dashmap::DashMap;
 use ropey::Rope;
 use serde_json::Value;
@@ -29,18 +31,12 @@ pub struct Backend {
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         // TODO: Workspace folders / settings
-        let mut cwd = "".to_string();
-        if params.root_uri.is_some() {
-            let path = params.root_uri.unwrap().to_file_path();
-            if path.is_ok() {
-                cwd = path.unwrap().to_str().unwrap().to_string();
-            }
-        }
+        self.param_map.insert(
+            "root".to_string(),
+            Value::String(Backend::workspace_root(&params)),
+        );
 
-        self.param_map
-            .insert("root".to_string(), Value::String(cwd.clone()));
-
-        self.init(params.initialization_options, cwd).await;
+        self.init(params.initialization_options).await;
         Ok(InitializeResult {
             server_info: None,
             offset_encoding: None,
@@ -425,7 +421,7 @@ impl Backend {
         }
     }
 
-    async fn init(&self, params: Option<Value>, cwd: String) {
+    async fn init(&self, params: Option<Value>) {
         self.parse_params(params);
         if self.should_install() {
             match self.cli.install_or_update() {
@@ -462,6 +458,32 @@ impl Backend {
 
     fn root_path(&self) -> String {
         self.get_string("root")
+    }
+
+    /// `workspace_root` returns the directory we run Vale from.
+    ///
+    /// `rootUri` is deprecated and not every client sends it, so we fall back
+    /// to the first workspace folder and then to our own working directory --
+    /// leaving this empty makes every Vale invocation fail to spawn.
+    fn workspace_root(params: &InitializeParams) -> String {
+        let from_uri = params
+            .root_uri
+            .as_ref()
+            .and_then(|uri| uri.to_file_path().ok());
+
+        let from_folders = || {
+            params
+                .workspace_folders
+                .as_ref()?
+                .first()
+                .and_then(|f| f.uri.to_file_path().ok())
+        };
+
+        from_uri
+            .or_else(from_folders)
+            .or_else(|| env::current_dir().ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default()
     }
 
     fn parse_params(&self, params: Option<Value>) {

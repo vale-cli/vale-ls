@@ -158,6 +158,21 @@ impl ValeManager {
         self.managed_exe.exists() || self.fallback_exe.exists()
     }
 
+    /// `resolve_cwd` returns the directory to run Vale from, if we have one.
+    ///
+    /// LSP clients aren't required to send `rootUri`, so our idea of the
+    /// workspace root may be empty. Handing that to `current_dir` fails the
+    /// spawn with `ENOENT` before Vale ever runs, so we inherit our own
+    /// working directory instead.
+    fn resolve_cwd(cwd: &str) -> Option<PathBuf> {
+        let path = PathBuf::from(cwd);
+        if path.is_dir() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
     /// `install_or_update` checks if Vale is installed and, if so, checks if it's
     /// the latest version.
     pub(crate) fn install_or_update(&self) -> Result<String, Error> {
@@ -222,11 +237,13 @@ impl ValeManager {
         args.push("sync".to_string());
 
         let exe = self.exe_path(false)?;
-        let _ = Command::new(exe.as_os_str())
-            .current_dir(cwd.clone())
-            .args(args)
-            // NOTE: Calling `status` causes the server to crash?
-            .output()?;
+        let mut cmd = Command::new(exe.as_os_str());
+        if let Some(dir) = Self::resolve_cwd(&cwd) {
+            cmd.current_dir(dir);
+        }
+
+        // NOTE: Calling `status` causes the server to crash?
+        let _ = cmd.args(args).output()?;
 
         Ok(())
     }
@@ -239,10 +256,12 @@ impl ValeManager {
         args.push("ls-config".to_string());
 
         let exe = self.exe_path(false)?;
-        let out = Command::new(exe.as_os_str())
-            .current_dir(cwd.clone())
-            .args(args)
-            .output()?;
+        let mut cmd = Command::new(exe.as_os_str());
+        if let Some(dir) = Self::resolve_cwd(&cwd) {
+            cmd.current_dir(dir);
+        }
+
+        let out = cmd.args(args).output()?;
 
         let config: ValeConfig = serde_json::from_slice(&out.stdout)?;
         Ok(config)
@@ -290,10 +309,12 @@ impl ValeManager {
         args.push(rule);
 
         let exe = self.exe_path(false)?;
-        let compiled = Command::new(exe.as_os_str())
-            .current_dir(cwd.clone())
-            .args(args)
-            .output()?;
+        let mut cmd = Command::new(exe.as_os_str());
+        if let Some(dir) = Self::resolve_cwd(&cwd) {
+            cmd.current_dir(dir);
+        }
+
+        let compiled = cmd.args(args).output()?;
 
         let buf = String::from_utf8(compiled.stdout)?;
         let rule: CompiledRule = serde_json::from_str(&buf)?;
@@ -398,6 +419,20 @@ mod tests {
 
         let v2 = Version::parse(&mgr.fetch_version().unwrap()).unwrap();
         assert!(v2 >= Version::parse("2.0.0").unwrap());
+    }
+
+    #[test]
+    fn cwd_falls_back_to_ours() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            ValeManager::resolve_cwd(dir.path().to_str().unwrap()),
+            Some(dir.path().to_path_buf())
+        );
+
+        // A client that doesn't send `rootUri` leaves us without a root.
+        assert_eq!(ValeManager::resolve_cwd(""), None);
+        assert_eq!(ValeManager::resolve_cwd("does-not-exist"), None);
     }
 
     #[test]
