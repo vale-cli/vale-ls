@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+      - run: cargo build --locked
+      # The `version` test asks GitHub for Vale's latest release, which is
+      # rate limited per runner IP -- a flaky gate rather than a useful one.
+      - run: cargo test --locked -- --skip version
