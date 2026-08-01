@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-
 use reqwest;
 use serde::Deserialize;
+use serde_json::json;
 
 use crate::error::Error;
 
@@ -17,17 +16,23 @@ pub(crate) struct Regex101Session {
 }
 
 pub(crate) fn upload(pattern: String) -> Result<Regex101Session, Error> {
-    let mut map = HashMap::new();
-
-    map.insert("regex", pattern.as_str());
-    map.insert("flags", "gm");
-    map.insert("testString", "Enter your test content here.");
-    map.insert("flavor", "pcre2");
-    map.insert("delimiter", "/");
+    // `substitution`, `listSubstitution`, and `unitTests` are all rejected as
+    // missing if we leave them out, even though we have nothing to put in
+    // them.
+    let body = json!({
+        "regex": pattern,
+        "flags": "gm",
+        "testString": "Enter your test content here.",
+        "flavor": "pcre2",
+        "delimiter": "/",
+        "substitution": "",
+        "listSubstitution": "",
+        "unitTests": [],
+    });
 
     let resp = reqwest::blocking::Client::new()
         .post("https://regex101.com/api/regex")
-        .json(&map)
+        .json(&body)
         .send()?;
 
     let body = resp.text()?;

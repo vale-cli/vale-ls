@@ -306,6 +306,35 @@ impl ValeManager {
         Ok(config)
     }
 
+    /// `metrics` reports the given file's internal metrics -- word count,
+    /// sentence count, and the counts the readability formulas are built on.
+    pub(crate) fn metrics(
+        &self,
+        fp: PathBuf,
+        config_path: String,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, Error> {
+        let mut args = vec![];
+        if config_path != "" {
+            args.push(format!("--config={}", config_path));
+        }
+        args.push("ls-metrics".to_string());
+        args.push(fp.as_path().display().to_string());
+
+        let exe = self.exe_path(false)?;
+        let mut cmd = Command::new(exe.as_os_str());
+        if let Some(dir) = fp
+            .parent()
+            .and_then(|p| Self::resolve_cwd(&p.to_string_lossy()))
+        {
+            cmd.current_dir(dir);
+        }
+
+        let out = cmd.args(args).output()?;
+        let metrics = serde_json::from_slice(&out.stdout)?;
+
+        Ok(metrics)
+    }
+
     pub(crate) fn fix(&self, alert: &str) -> Result<ValeFix, Error> {
         let mut file = NamedTempFile::new()?;
         file.write_all(alert.as_bytes())?;

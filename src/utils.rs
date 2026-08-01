@@ -150,9 +150,39 @@ pub(crate) fn alert_to_diagnostic(alert: &vale::ValeAlert) -> Diagnostic {
     d
 }
 
+/// `metrics_summary` condenses Vale's metrics into a one-line code lens.
+pub(crate) fn metrics_summary(metrics: &serde_json::Map<String, serde_json::Value>) -> String {
+    let count = |key: &str| metrics.get(key).and_then(|v| v.as_i64());
+
+    let parts: Vec<String> = [("words", "word"), ("sentences", "sentence")]
+        .iter()
+        .filter_map(|(key, noun)| {
+            let n = count(key)?;
+            Some(format!("{} {}{}", n, noun, if n == 1 { "" } else { "s" }))
+        })
+        .collect();
+
+    parts.join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary() {
+        let one: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"words": 1, "sentences": 1, "characters": 4}"#).unwrap();
+        assert_eq!(metrics_summary(&one), "1 word, 1 sentence");
+
+        let many: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"words": 12, "sentences": 3}"#).unwrap();
+        assert_eq!(metrics_summary(&many), "12 words, 3 sentences");
+
+        // Vale reported something we don't recognize.
+        let empty: serde_json::Map<String, serde_json::Value> = serde_json::from_str("{}").unwrap();
+        assert_eq!(metrics_summary(&empty), "");
+    }
 
     #[test]
     fn arch() {

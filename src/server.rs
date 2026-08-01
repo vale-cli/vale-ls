@@ -57,7 +57,10 @@ impl LanguageServer for Backend {
                     commands: vec![
                         "cli.sync".to_string(),
                         "cli.compile".to_string(),
+                        "cli.install".to_string(),
                         "vocab.add".to_string(),
+                        "vocab.reject".to_string(),
+                        "doc.metrics".to_string(),
                     ],
                     work_done_progress_options: Default::default(),
                 }),
@@ -78,7 +81,9 @@ impl LanguageServer for Backend {
                     },
                 )),
                 code_lens_provider: Some(CodeLensOptions {
-                    resolve_provider: Some(true),
+                    // Our lenses always carry their command, so there's
+                    // nothing for `codeLens/resolve` to fill in.
+                    resolve_provider: Some(false),
                 }),
                 workspace: Some(WorkspaceServerCapabilities {
                     workspace_folders: Some(WorkspaceFoldersServerCapabilities {
@@ -134,7 +139,10 @@ impl LanguageServer for Backend {
         match params.command.as_str() {
             "cli.sync" => self.do_sync().await,
             "cli.compile" => self.do_compile(params.arguments).await,
-            "vocab.add" => self.do_add_to_vocab(params.arguments).await,
+            "cli.install" => self.do_install().await,
+            "vocab.add" => self.do_add_to_vocab(params.arguments, true).await,
+            "vocab.reject" => self.do_add_to_vocab(params.arguments, false).await,
+            "doc.metrics" => self.do_metrics(params.arguments).await,
             _ => {}
         };
         Ok(None)
@@ -318,8 +326,45 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
-    async fn code_lens(&self, _: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
-        Ok(None)
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        if !self.should_show_metrics() {
+            return Ok(None);
+        }
+
+        let uri = params.text_document.uri;
+
+        // Config and rule files aren't prose; counting their words is noise.
+        let ext = self.get_ext(uri.clone());
+        if ext == "ini" || ext == "yml" {
+            return Ok(None);
+        }
+
+        let fp = match uri.to_file_path() {
+            Ok(fp) => fp,
+            Err(_) => return Ok(None),
+        };
+
+        // Vale exits non-zero for formats it can't parse, which just means
+        // there's nothing to report here.
+        let metrics = match self.vale().metrics(fp, self.config_path()) {
+            Ok(metrics) => metrics,
+            Err(_) => return Ok(None),
+        };
+
+        let title = utils::metrics_summary(&metrics);
+        if title.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(vec![CodeLens {
+            range: Range::new(Position::new(0, 0), Position::new(0, 0)),
+            command: Some(Command {
+                title,
+                command: "doc.metrics".to_string(),
+                arguments: Some(vec![serde_json::json!({ "uri": uri.to_string() })]),
+            }),
+            data: None,
+        }]))
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
@@ -463,10 +508,23 @@ impl Backend {
         }
     }
 
+    /// `install_or_update` downloads Vale off the async runtime.
+    ///
+    /// It reaches the network through a blocking client, which builds and
+    /// drops a runtime of its own -- doing that inside an async context
+    /// panics and takes the whole server down with it.
+    async fn install_or_update(&self) -> std::result::Result<String, crate::error::Error> {
+        let cli = self.vale();
+        match tokio::task::spawn_blocking(move || cli.install_or_update()).await {
+            Ok(result) => result,
+            Err(e) => Err(crate::error::Error::from(e.to_string())),
+        }
+    }
+
     async fn init(&self, params: Option<Value>) {
         self.parse_params(params);
         if self.should_install() {
-            match self.vale().install_or_update() {
+            match self.install_or_update().await {
                 Ok(status) => {
                     self.client.log_message(MessageType::INFO, status).await;
                 }
@@ -509,6 +567,12 @@ impl Backend {
 
     fn should_sync(&self) -> bool {
         self.get_setting("syncOnStartup") == Some(Value::Bool(true))
+    }
+
+    /// Unlike our other settings, this one is on unless it's turned off: the
+    /// lens is the only thing our advertised `codeLensProvider` offers.
+    fn should_show_metrics(&self) -> bool {
+        self.get_setting("showMetrics") != Some(Value::Bool(false))
     }
 
     /// `root_path` returns the directory we run Vale from when we have no
@@ -708,7 +772,10 @@ impl Backend {
             .collect()
     }
 
-    async fn do_add_to_vocab(&self, arguments: Vec<Value>) {
+    /// `do_add_to_vocab` adds a term to a vocabulary's `accept.txt` (or, when
+    /// `accept` is false, its `reject.txt`).
+    async fn do_add_to_vocab(&self, arguments: Vec<Value>, accept: bool) {
+        let list = if accept { "accept" } else { "reject" };
         let arg = arguments.first().cloned().unwrap_or(Value::Null);
         let fields = (
             arg.get("uri").and_then(Value::as_str),
@@ -720,7 +787,10 @@ impl Backend {
             (Some(uri), Some(vocab), Some(term)) => (uri, vocab, term),
             _ => {
                 self.client
-                    .show_message(MessageType::ERROR, "Malformed 'vocab.add' arguments.")
+                    .show_message(
+                        MessageType::ERROR,
+                        "Expected a 'uri', 'vocab', and 'term' argument.",
+                    )
                     .await;
                 return;
             }
@@ -747,7 +817,13 @@ impl Backend {
         };
 
         let path = styles::StylesPath::new(config.styles_paths());
-        if let Err(e) = path.add_to_accept(vocab, term) {
+        let added = if accept {
+            path.add_to_accept(vocab, term)
+        } else {
+            path.add_to_reject(vocab, term)
+        };
+
+        if let Err(e) = added {
             self.client
                 .show_message(
                     MessageType::ERROR,
@@ -760,12 +836,64 @@ impl Backend {
         self.client
             .show_message(
                 MessageType::INFO,
-                format!("Added '{}' to the '{}' vocabulary.", term, vocab),
+                format!(
+                    "Added '{}' to '{}' in the '{}' vocabulary.",
+                    term, list, vocab
+                ),
             )
             .await;
 
-        // Re-lint so the alert we just accepted clears without an edit.
+        // Re-lint so the change we just made is reflected without an edit.
         self.lint(&uri).await;
+    }
+
+    async fn do_install(&self) {
+        match self.install_or_update().await {
+            Ok(status) => {
+                self.client.show_message(MessageType::INFO, status).await;
+            }
+            Err(e) => {
+                self.client
+                    .show_message(MessageType::ERROR, format!("Failed to install Vale: {}", e))
+                    .await;
+            }
+        }
+    }
+
+    async fn do_metrics(&self, arguments: Vec<Value>) {
+        let arg = arguments.first().cloned().unwrap_or(Value::Null);
+        let uri = arg
+            .get("uri")
+            .and_then(Value::as_str)
+            .and_then(|uri| Url::parse(uri).ok())
+            .and_then(|uri| uri.to_file_path().ok());
+
+        let fp = match uri {
+            Some(fp) => fp,
+            None => {
+                self.client
+                    .show_message(MessageType::ERROR, "Expected a 'uri' argument.")
+                    .await;
+                return;
+            }
+        };
+
+        match self.vale().metrics(fp, self.config_path()) {
+            Ok(metrics) => {
+                let report = metrics
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k.replace('_', " "), v))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                self.client.show_message(MessageType::INFO, report).await;
+            }
+            Err(e) => {
+                self.client
+                    .show_message(MessageType::ERROR, format!("Failed to read metrics: {}", e))
+                    .await;
+            }
+        }
     }
 
     async fn do_sync(&self) {
@@ -805,11 +933,25 @@ impl Backend {
             return;
         }
 
-        let resp = self.vale().upload_rule(
-            self.config_path(),
-            self.root_for_path(&uri),
-            uri.to_str().unwrap().to_string(),
-        );
+        // Uploading to Regex101 goes through a blocking client, which can't
+        // be dropped on the async runtime -- see `install_or_update`.
+        let cli = self.vale();
+        let config_path = self.config_path();
+        let root = self.root_for_path(&uri);
+        let rule = uri.to_str().unwrap().to_string();
+
+        let resp =
+            match tokio::task::spawn_blocking(move || cli.upload_rule(config_path, root, rule))
+                .await
+            {
+                Ok(resp) => resp,
+                Err(e) => {
+                    self.client
+                        .show_message(MessageType::ERROR, format!("Failed to compile rule: {}", e))
+                        .await;
+                    return;
+                }
+            };
 
         match resp {
             Ok(r) => {
