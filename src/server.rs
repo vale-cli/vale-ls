@@ -404,7 +404,8 @@ impl LanguageServer for Backend {
             .map(CodeActionOrCommand::CodeAction)
             .collect::<Vec<_>>();
 
-        match self.vale().fix(&s) {
+        let uri = &params.text_document.uri;
+        match self.vale().fix(&s, self.config_path(), self.root_for(uri)) {
             Ok(fixed) => {
                 let mut range = utils::alert_to_range(alert.clone());
 

@@ -382,16 +382,40 @@ impl ValeManager {
         Ok(metrics)
     }
 
-    pub(crate) fn fix(&self, alert: &str) -> Result<ValeFix, Error> {
+    /// `fix` asks Vale how the given alert could be resolved.
+    ///
+    /// Like every other subcommand, this one loads the project's
+    /// configuration -- so it needs `--config` and a working directory, or it
+    /// answers from whatever config it happens to find instead.
+    pub(crate) fn fix(
+        &self,
+        alert: &str,
+        config_path: String,
+        cwd: String,
+    ) -> Result<ValeFix, Error> {
         let mut file = NamedTempFile::new()?;
         file.write_all(alert.as_bytes())?;
 
+        let mut args = vec![];
+        if config_path != "" {
+            args.push(format!("--config={}", config_path));
+        }
+        args.push("fix".to_string());
+        args.push(file.path().display().to_string());
+
         let exe = self.exe_path(false)?;
-        let out = Command::new(exe.as_os_str())
-            .arg("fix")
-            .arg(file.path())
-            .output()?;
+        let mut cmd = Command::new(exe.as_os_str());
+        if let Some(dir) = Self::resolve_cwd(&cwd) {
+            cmd.current_dir(dir);
+        }
+
+        let out = cmd.args(args).output()?;
         let buf = String::from_utf8(out.stdout)?;
+        if buf.is_empty() {
+            // Vale reports its own failures on stderr; parsing the empty
+            // stdout would blame the JSON instead.
+            return Err(Error::Msg(String::from_utf8(out.stderr)?));
+        }
 
         let fix: ValeFix = serde_json::from_str(&buf)?;
         Ok(fix)
