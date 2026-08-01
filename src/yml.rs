@@ -14,6 +14,7 @@ pub enum Extends {
     Conditional,
     Capitalization,
     Metric,
+    Readability,
     Spelling,
     Sequence,
     Script,
@@ -56,6 +57,7 @@ impl Rule {
                     "conditional" => Extends::Conditional,
                     "capitalization" => Extends::Capitalization,
                     "metric" => Extends::Metric,
+                    "readability" => Extends::Readability,
                     "spelling" => Extends::Spelling,
                     "sequence" => Extends::Sequence,
                     "script" => Extends::Script,
@@ -90,6 +92,7 @@ impl Rule {
                 "conditional",
                 "capitalization",
                 "metric",
+                "readability",
                 "spelling",
                 "sequence",
                 "script",
@@ -111,6 +114,7 @@ impl Rule {
             Extends::Conditional => true,
             Extends::Capitalization => true,
             Extends::Metric => false,
+            Extends::Readability => false,
             Extends::Spelling => false,
             Extends::Sequence => false,
             Extends::Script => false,
@@ -130,6 +134,7 @@ impl Rule {
             Extends::Conditional => self.conditional(tok),
             Extends::Capitalization => self.capitalization(tok),
             Extends::Metric => self.metric(tok),
+            Extends::Readability => self.readability(tok),
             Extends::Spelling => self.spelling(tok),
             Extends::Sequence => self.sequence(tok),
             Extends::Script => self.script(tok),
@@ -150,6 +155,7 @@ impl Rule {
             "link" => Some(include_str!("../doc/yml/link.md").into()),
             "limit" => Some(include_str!("../doc/yml/limit.md").into()),
             "action" => Some(include_str!("../doc/yml/action.md").into()),
+            "description" => Some(include_str!("../doc/yml/description.md").into()),
             _ => None,
         }
     }
@@ -163,6 +169,7 @@ impl Rule {
             "raw" => Some(include_str!("../doc/yml/existence/raw.md").into()),
             "tokens" => Some(include_str!("../doc/yml/existence/tokens.md").into()),
             "exceptions" => Some(include_str!("../doc/yml/existence/exceptions.md").into()),
+            "vocab" => Some(include_str!("../doc/yml/existence/vocab.md").into()),
             _ => self.common(key, example),
         }
     }
@@ -170,11 +177,12 @@ impl Rule {
     fn substitution(&self, key: &str) -> Option<Cow<'static, str>> {
         let example = include_str!("../doc/yml/substitution/example.md");
         match key {
-            "append" => Some(include_str!("../doc/yml/substitution/append.md").into()),
             "ignorecase" => Some(include_str!("../doc/yml/substitution/ignorecase.md").into()),
             "nonword" => Some(include_str!("../doc/yml/substitution/nonword.md").into()),
             "exceptions" => Some(include_str!("../doc/yml/substitution/exceptions.md").into()),
             "swap" => Some(include_str!("../doc/yml/substitution/swap.md").into()),
+            "capitalize" => Some(include_str!("../doc/yml/substitution/capitalize.md").into()),
+            "vocab" => Some(include_str!("../doc/yml/substitution/vocab.md").into()),
             _ => self.common(key, example),
         }
     }
@@ -185,6 +193,7 @@ impl Rule {
             "min" => Some(include_str!("../doc/yml/occurrence/min.md").into()),
             "max" => Some(include_str!("../doc/yml/occurrence/max.md").into()),
             "token" => Some(include_str!("../doc/yml/occurrence/token.md").into()),
+            "ignorecase" => Some(include_str!("../doc/yml/occurrence/ignorecase.md").into()),
             _ => self.common(key, example),
         }
     }
@@ -194,6 +203,10 @@ impl Rule {
         match key {
             "alpha" => Some(include_str!("../doc/yml/repetition/alpha.md").into()),
             "tokens" => Some(include_str!("../doc/yml/repetition/tokens.md").into()),
+            "max" => Some(include_str!("../doc/yml/repetition/max.md").into()),
+            "ignorecase" => Some(include_str!("../doc/yml/repetition/ignorecase.md").into()),
+            "exceptions" => Some(include_str!("../doc/yml/repetition/exceptions.md").into()),
+            "vocab" => Some(include_str!("../doc/yml/repetition/vocab.md").into()),
             _ => self.common(key, example),
         }
     }
@@ -214,6 +227,8 @@ impl Rule {
             "first" => Some(include_str!("../doc/yml/conditional/first.md").into()),
             "second" => Some(include_str!("../doc/yml/conditional/second.md").into()),
             "ignorecase" => Some(include_str!("../doc/yml/conditional/ignorecase.md").into()),
+            "exceptions" => Some(include_str!("../doc/yml/conditional/exceptions.md").into()),
+            "vocab" => Some(include_str!("../doc/yml/conditional/vocab.md").into()),
             _ => self.common(key, example),
         }
     }
@@ -224,6 +239,19 @@ impl Rule {
             "exceptions" => Some(include_str!("../doc/yml/capitalization/exceptions.md").into()),
             "match" => Some(include_str!("../doc/yml/capitalization/match.md").into()),
             "style" => Some(include_str!("../doc/yml/capitalization/style.md").into()),
+            "indicators" => Some(include_str!("../doc/yml/capitalization/indicators.md").into()),
+            "threshold" => Some(include_str!("../doc/yml/capitalization/threshold.md").into()),
+            "prefix" => Some(include_str!("../doc/yml/capitalization/prefix.md").into()),
+            "vocab" => Some(include_str!("../doc/yml/capitalization/vocab.md").into()),
+            _ => self.common(key, example),
+        }
+    }
+
+    fn readability(&self, key: &str) -> Option<Cow<'static, str>> {
+        let example = include_str!("../doc/yml/readability/example.md");
+        match key {
+            "metrics" => Some(include_str!("../doc/yml/readability/metrics.md").into()),
+            "grade" => Some(include_str!("../doc/yml/readability/grade.md").into()),
             _ => self.common(key, example),
         }
     }
@@ -246,6 +274,8 @@ impl Rule {
             "dictionaries" => Some(include_str!("../doc/yml/spelling/dictionaries.md").into()),
             "filters" => Some(include_str!("../doc/yml/spelling/filters.md").into()),
             "ignore" => Some(include_str!("../doc/yml/spelling/ignore.md").into()),
+            "aff" => Some(include_str!("../doc/yml/spelling/aff.md").into()),
+            "dic" => Some(include_str!("../doc/yml/spelling/dic.md").into()),
             _ => self.common(key, example),
         }
     }
@@ -255,6 +285,8 @@ impl Rule {
         match key {
             "ignorecase" => Some(include_str!("../doc/yml/sequence/ignorecase.md").into()),
             "tokens" => Some(include_str!("../doc/yml/sequence/tokens.md").into()),
+            "negate" => Some(include_str!("../doc/yml/sequence/negate.md").into()),
+            "skip" => Some(include_str!("../doc/yml/sequence/skip.md").into()),
             _ => self.common(key, example),
         }
     }

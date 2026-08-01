@@ -10,7 +10,11 @@ use crate::styles::StylesPath;
 use crate::utils;
 
 pub fn key_to_info(key: &str) -> Option<&str> {
-    match key {
+    // A section header is a token in its own right -- `[formats]` -- so the
+    // brackets come along with it.
+    match key.trim_matches(|c| c == '[' || c == ']') {
+        "formats" => Some(include_str!("../doc/ini/section/Formats.md")),
+        "asciidoctor" => Some(include_str!("../doc/ini/section/Asciidoctor.md")),
         "StylesPath" => Some(include_str!("../doc/ini/StylesPath.md")),
         "MinAlertLevel" => Some(include_str!("../doc/ini/MinAlertLevel.md")),
         "IgnoredScopes" => Some(include_str!("../doc/ini/IgnoredScopes.md")),
@@ -23,6 +27,11 @@ pub fn key_to_info(key: &str) -> Option<&str> {
         "Transform" => Some(include_str!("../doc/ini/Transform.md")),
         "Vocab" => Some(include_str!("../doc/ini/Vocab.md")),
         "Packages" => Some(include_str!("../doc/ini/Packages.md")),
+        "CommentDelimiters" => Some(include_str!("../doc/ini/CommentDelimiters.md")),
+        "IgnorePatterns" => Some(include_str!("../doc/ini/IgnorePatterns.md")),
+        "Lang" => Some(include_str!("../doc/ini/Lang.md")),
+        "NLPEndpoint" => Some(include_str!("../doc/ini/NLPEndpoint.md")),
+        "View" => Some(include_str!("../doc/ini/View.md")),
         _ => None,
     }
 }
