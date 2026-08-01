@@ -101,25 +101,27 @@ impl StylesPath {
         let root = self.path();
 
         // `Vocab` is the pre-v3 location of `config/vocabularies`.
-        let mut path = root.join("config").join("vocabularies").join(name);
-        if !path.is_dir() {
-            path = root.join("Vocab").join(name);
+        let mut dir = root.join("config").join("vocabularies").join(name);
+        if !dir.is_dir() && root.join("Vocab").join(name).is_dir() {
+            dir = root.join("Vocab").join(name);
         }
 
-        if accept {
-            path = path.join("accept.txt");
-        } else {
-            path = path.join("reject.txt");
-        }
+        let path = dir.join(if accept { "accept.txt" } else { "reject.txt" });
 
-        let content = fs::read_to_string(path.clone())?;
+        // Vale creates these on `sync`, but a project may have a vocabulary
+        // it hasn't written a term to yet.
+        fs::create_dir_all(&dir)?;
+        let content = fs::read_to_string(&path).unwrap_or_default();
+
         let mut lines = content.lines().collect::<Vec<_>>();
+        if lines.contains(&term) {
+            return Ok(());
+        }
 
         lines.push(term);
-        lines.sort();
+        lines.sort_by_key(|line| line.to_lowercase());
 
-        let content = lines.join("\n");
-        fs::write(path, content)?;
+        fs::write(path, lines.join("\n") + "\n")?;
 
         Ok(())
     }
@@ -251,6 +253,53 @@ mod tests {
         let vocab = p.get_vocab().unwrap();
         assert_eq!(vocab.len(), 1);
         assert_eq!(vocab[0].name, "Proj");
+    }
+
+    #[test]
+    fn add_to_vocab_writes_sorted_terms() {
+        let dir = tempfile::tempdir().unwrap();
+        let vocab = dir.path().join("config").join("vocabularies").join("Proj");
+
+        fs::create_dir_all(&vocab).unwrap();
+        fs::write(vocab.join("accept.txt"), "beta\n").unwrap();
+
+        let p = StylesPath::new(vec![dir.path().to_path_buf()]);
+        p.add_to_accept("Proj", "alpha").unwrap();
+        p.add_to_accept("Proj", "Gamma").unwrap();
+
+        // Sorted case-insensitively, and Vale wants a trailing newline.
+        let content = fs::read_to_string(vocab.join("accept.txt")).unwrap();
+        assert_eq!(content, "alpha\nbeta\nGamma\n");
+
+        // Adding a term twice is a no-op, not a duplicate line.
+        p.add_to_accept("Proj", "alpha").unwrap();
+        assert_eq!(
+            fs::read_to_string(vocab.join("accept.txt")).unwrap(),
+            "alpha\nbeta\nGamma\n"
+        );
+
+        // A vocabulary that has no file yet still works.
+        p.add_to_reject("Proj", "nope").unwrap();
+        assert_eq!(
+            fs::read_to_string(vocab.join("reject.txt")).unwrap(),
+            "nope\n"
+        );
+    }
+
+    #[test]
+    fn add_to_vocab_honors_the_legacy_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("Vocab").join("Proj");
+        fs::create_dir_all(&legacy).unwrap();
+
+        let p = StylesPath::new(vec![dir.path().to_path_buf()]);
+        p.add_to_accept("Proj", "alpha").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(legacy.join("accept.txt")).unwrap(),
+            "alpha\n"
+        );
+        assert!(!dir.path().join("config").exists());
     }
 
     #[test]

@@ -32,6 +32,9 @@ pub(crate) struct ValeConfig {
     /// predate `Paths`.
     #[serde(default)]
     pub styles_path: Option<PathBuf>,
+    /// The vocabularies the project has active, in the order they're listed.
+    #[serde(default)]
+    pub vocab: Option<Vec<String>>,
 }
 
 impl ValeConfig {
@@ -41,6 +44,11 @@ impl ValeConfig {
             return self.paths.clone();
         }
         self.styles_path.clone().into_iter().collect()
+    }
+
+    /// The active vocabularies, which a term can be added to.
+    pub fn vocabs(&self) -> Vec<String> {
+        self.vocab.clone().unwrap_or_default()
     }
 }
 

@@ -54,7 +54,11 @@ impl LanguageServer for Backend {
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
-                    commands: vec!["cli.sync".to_string(), "cli.compile".to_string()],
+                    commands: vec![
+                        "cli.sync".to_string(),
+                        "cli.compile".to_string(),
+                        "vocab.add".to_string(),
+                    ],
                     work_done_progress_options: Default::default(),
                 }),
                 completion_provider: Some(CompletionOptions {
@@ -130,6 +134,7 @@ impl LanguageServer for Backend {
         match params.command.as_str() {
             "cli.sync" => self.do_sync().await,
             "cli.compile" => self.do_compile(params.arguments).await,
+            "vocab.add" => self.do_add_to_vocab(params.arguments).await,
             _ => {}
         };
         Ok(None)
@@ -331,13 +336,25 @@ impl LanguageServer for Backend {
         }
 
         let s = serde_json::to_string(diagnostics.unwrap()).unwrap();
+        let alert: vale::ValeAlert = match serde_json::from_str(&s) {
+            Ok(alert) => alert,
+            Err(_) => return Ok(None),
+        };
+
+        // Offered even when Vale has no replacement to suggest, so these are
+        // built before (and independently of) the fixes below.
+        let vocab = self
+            .vocab_actions(&params, &alert)
+            .into_iter()
+            .map(CodeActionOrCommand::CodeAction)
+            .collect::<Vec<_>>();
+
         match self.vale().fix(&s) {
             Ok(fixed) => {
-                let alert: vale::ValeAlert = serde_json::from_str(&s).unwrap();
                 let mut range = utils::alert_to_range(alert.clone());
 
                 if !alert.action.name.is_some() {
-                    return Ok(None);
+                    return Ok(Some(vocab));
                 }
 
                 let action_name = alert.action.name.unwrap();
@@ -347,7 +364,7 @@ impl LanguageServer for Backend {
                     range.end.character += 1;
                 }
 
-                let mut fixes = vec![];
+                let mut fixes = vocab;
                 for fix in fixed.suggestions {
                     fixes.push(CodeActionOrCommand::CodeAction(CodeAction {
                         title: utils::make_title(
@@ -381,7 +398,7 @@ impl LanguageServer for Backend {
                 self.client
                     .log_message(MessageType::ERROR, format!("Error: {}", e))
                     .await;
-                Ok(None)
+                Ok(Some(vocab))
             }
         }
     }
@@ -390,12 +407,20 @@ impl LanguageServer for Backend {
 impl Backend {
     async fn on_change(&self, params: TextDocumentItem) {
         let uri = params.uri.clone();
+        self.update(params);
+        self.lint(&uri).await;
+    }
+
+    /// `lint` runs Vale over `uri` and publishes what it reports.
+    ///
+    /// Vale reads the file from disk, so this doesn't need the document's
+    /// text -- which matters for the documents we don't track, like Markdown.
+    async fn lint(&self, uri: &Url) {
         let fp = uri.to_file_path();
 
         let vale = self.vale();
         let has_cli = vale.is_installed();
 
-        self.update(params.clone());
         if has_cli && fp.is_ok() {
             match vale.run(fp.unwrap(), self.config_path(), self.config_filter()) {
                 Ok(result) => {
@@ -406,7 +431,7 @@ impl Backend {
                         }
                     }
                     self.client
-                        .publish_diagnostics(params.uri.clone(), diagnostics, None)
+                        .publish_diagnostics(uri.clone(), diagnostics, None)
                         .await;
                 }
                 Err(err) => {
@@ -639,6 +664,108 @@ impl Backend {
             }
         }
         "".to_string()
+    }
+
+    /// `vocab_actions` offers to add a flagged term to a vocabulary.
+    ///
+    /// A project can have more than one active vocabulary, so we offer each of
+    /// them rather than guessing which one the user meant.
+    fn vocab_actions(&self, params: &CodeActionParams, alert: &vale::ValeAlert) -> Vec<CodeAction> {
+        let spelling = alert
+            .action
+            .params
+            .as_ref()
+            .is_some_and(|params| params.iter().any(|p| p == "spellings"));
+
+        if !spelling || alert.matched.is_empty() {
+            return vec![];
+        }
+
+        let uri = &params.text_document.uri;
+        let config = match self.vale().config(self.config_path(), self.root_for(uri)) {
+            Ok(config) => config,
+            Err(_) => return vec![],
+        };
+
+        config
+            .vocabs()
+            .into_iter()
+            .map(|name| CodeAction {
+                title: format!("Add '{}' to the '{}' vocabulary", alert.matched, name),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(params.context.diagnostics.clone()),
+                command: Some(Command {
+                    title: "Add to vocabulary".to_string(),
+                    command: "vocab.add".to_string(),
+                    arguments: Some(vec![serde_json::json!({
+                        "uri": uri.to_string(),
+                        "vocab": name,
+                        "term": alert.matched,
+                    })]),
+                }),
+                ..CodeAction::default()
+            })
+            .collect()
+    }
+
+    async fn do_add_to_vocab(&self, arguments: Vec<Value>) {
+        let arg = arguments.first().cloned().unwrap_or(Value::Null);
+        let fields = (
+            arg.get("uri").and_then(Value::as_str),
+            arg.get("vocab").and_then(Value::as_str),
+            arg.get("term").and_then(Value::as_str),
+        );
+
+        let (uri, vocab, term) = match fields {
+            (Some(uri), Some(vocab), Some(term)) => (uri, vocab, term),
+            _ => {
+                self.client
+                    .show_message(MessageType::ERROR, "Malformed 'vocab.add' arguments.")
+                    .await;
+                return;
+            }
+        };
+
+        let uri = match Url::parse(uri) {
+            Ok(uri) => uri,
+            Err(e) => {
+                self.client
+                    .show_message(MessageType::ERROR, format!("Invalid URI: {}", e))
+                    .await;
+                return;
+            }
+        };
+
+        let config = match self.vale().config(self.config_path(), self.root_for(&uri)) {
+            Ok(config) => config,
+            Err(e) => {
+                self.client
+                    .show_message(MessageType::ERROR, format!("Failed to read config: {}", e))
+                    .await;
+                return;
+            }
+        };
+
+        let path = styles::StylesPath::new(config.styles_paths());
+        if let Err(e) = path.add_to_accept(vocab, term) {
+            self.client
+                .show_message(
+                    MessageType::ERROR,
+                    format!("Failed to update the '{}' vocabulary: {}", vocab, e),
+                )
+                .await;
+            return;
+        }
+
+        self.client
+            .show_message(
+                MessageType::INFO,
+                format!("Added '{}' to the '{}' vocabulary.", term, vocab),
+            )
+            .await;
+
+        // Re-lint so the alert we just accepted clears without an edit.
+        self.lint(&uri).await;
     }
 
     async fn do_sync(&self) {
