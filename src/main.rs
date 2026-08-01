@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 use dashmap::DashMap;
 use tower_lsp::{LspService, Server};
@@ -8,13 +10,19 @@ use vale_ls::vale::ValeManager;
 /// The official Vale Language Server.
 #[derive(Parser, Debug)]
 #[command(version)]
-struct Args;
+struct Args {
+    /// Path to the Vale binary to use instead of a managed or `PATH` install.
+    ///
+    /// The `valeBinaryPath` client setting takes precedence over this.
+    #[arg(long, value_name = "PATH")]
+    vale_binary: Option<PathBuf>,
+}
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
-    let _ = Args::parse();
+    let args = Args::parse();
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
@@ -22,7 +30,7 @@ async fn main() {
         client,
         document_map: DashMap::new(),
         param_map: DashMap::new(),
-        cli: ValeManager::new(),
+        cli: ValeManager::with_custom_exe(args.vale_binary),
     })
     .finish();
 

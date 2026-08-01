@@ -275,7 +275,7 @@ impl LanguageServer for Backend {
         let context = rope.line(position.line as usize);
         let line = context.as_str().to_owned().unwrap_or("");
 
-        let config = self.cli.config(self.config_path(), self.root_for(&uri));
+        let config = self.vale().config(self.config_path(), self.root_for(&uri));
         if config.is_err() {
             return Ok(None);
         }
@@ -331,7 +331,7 @@ impl LanguageServer for Backend {
         }
 
         let s = serde_json::to_string(diagnostics.unwrap()).unwrap();
-        match self.cli.fix(&s) {
+        match self.vale().fix(&s) {
             Ok(fixed) => {
                 let alert: vale::ValeAlert = serde_json::from_str(&s).unwrap();
                 let mut range = utils::alert_to_range(alert.clone());
@@ -392,14 +392,12 @@ impl Backend {
         let uri = params.uri.clone();
         let fp = uri.to_file_path();
 
-        let has_cli = self.cli.is_installed();
+        let vale = self.vale();
+        let has_cli = vale.is_installed();
 
         self.update(params.clone());
         if has_cli && fp.is_ok() {
-            match self
-                .cli
-                .run(fp.unwrap(), self.config_path(), self.config_filter())
-            {
+            match vale.run(fp.unwrap(), self.config_path(), self.config_filter()) {
                 Ok(result) => {
                     let mut diagnostics = Vec::new();
                     for (_, v) in result.iter() {
@@ -426,9 +424,13 @@ impl Backend {
                 }
             }
         } else if !has_cli {
-            self.client
-                .log_message(MessageType::WARNING, "Vale CLI not installed!")
-                .await;
+            // Say which binary is missing: a configured path that doesn't
+            // exist is a typo to fix, not a missing install.
+            let message = match vale.custom_exe {
+                Some(exe) => format!("Configured Vale binary not found: {}", exe.display()),
+                None => "Vale CLI not installed!".to_string(),
+            };
+            self.client.log_message(MessageType::WARNING, message).await;
         } else {
             self.client
                 .log_message(MessageType::INFO, "No file path found. Is the file saved?")
@@ -439,7 +441,7 @@ impl Backend {
     async fn init(&self, params: Option<Value>) {
         self.parse_params(params);
         if self.should_install() {
-            match self.cli.install_or_update() {
+            match self.vale().install_or_update() {
                 Ok(status) => {
                     self.client.log_message(MessageType::INFO, status).await;
                 }
@@ -457,6 +459,19 @@ impl Backend {
 
     fn should_install(&self) -> bool {
         self.get_setting("installVale") == Some(Value::Bool(true))
+    }
+
+    /// `vale` returns the CLI to run, honoring a client-configured binary.
+    ///
+    /// The client can send `valeBinaryPath` at any point -- in
+    /// `initializationOptions` or later, via `didChangeConfiguration` -- so we
+    /// resolve it per call rather than at startup.
+    fn vale(&self) -> vale::ValeManager {
+        let configured = self.get_string("valeBinaryPath");
+        if configured.is_empty() {
+            return self.cli.clone();
+        }
+        self.cli.pinned_to(Some(PathBuf::from(configured)))
     }
 
     fn config_path(&self) -> String {
@@ -614,7 +629,7 @@ impl Backend {
         if uri.path().contains(".vale.ini") {
             return "ini".to_string();
         } else if ext == "yml" {
-            let config = self.cli.config(self.config_path(), self.root_for(&uri));
+            let config = self.vale().config(self.config_path(), self.root_for(&uri));
             if config.is_ok() {
                 let styles = config.unwrap().styles_paths();
                 let p = styles::StylesPath::new(styles);
@@ -627,7 +642,7 @@ impl Backend {
     }
 
     async fn do_sync(&self) {
-        match self.cli.sync(self.config_path(), self.root_path()) {
+        match self.vale().sync(self.config_path(), self.root_path()) {
             Ok(_) => {
                 self.client
                     .show_message(MessageType::INFO, "Successfully synced Vale config.")
@@ -663,7 +678,7 @@ impl Backend {
             return;
         }
 
-        let resp = self.cli.upload_rule(
+        let resp = self.vale().upload_rule(
             self.config_path(),
             self.root_for_path(&uri),
             uri.to_str().unwrap().to_string(),

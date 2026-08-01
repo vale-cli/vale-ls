@@ -119,6 +119,7 @@ pub struct ValeManager {
     pub arch: String,
 
     pub fallback_exe: PathBuf,
+    pub custom_exe: Option<PathBuf>,
 }
 
 // ValeManager manages the installation and execution of Vale.
@@ -131,6 +132,15 @@ impl ValeManager {
     // The ValeManager will attempt to use the managed version of Vale, but
     // will fall back to the system version if it's not available.
     pub fn new() -> ValeManager {
+        ValeManager::with_custom_exe(None)
+    }
+
+    /// `with_custom_exe` pins the manager to a specific Vale binary.
+    ///
+    /// A pinned binary is never substituted: a caller that asks for its own
+    /// installation needs a missing binary to be an error rather than a
+    /// silent fall back to a downloaded or `PATH` copy.
+    pub fn with_custom_exe(custom_exe: Option<PathBuf>) -> ValeManager {
         let arch = vale_arch();
 
         let fallback = which("vale").unwrap_or(PathBuf::from(""));
@@ -151,11 +161,26 @@ impl ValeManager {
             args: vec!["--output=JSON".to_string()],
             arch,
             fallback_exe: fallback,
+            custom_exe,
+        }
+    }
+
+    /// `pinned_to` returns a copy of this manager bound to `custom_exe`.
+    ///
+    /// The client can change the configured binary at any point, and probing
+    /// `PATH` again on every request to rebuild the manager isn't worth it.
+    pub fn pinned_to(&self, custom_exe: Option<PathBuf>) -> ValeManager {
+        ValeManager {
+            custom_exe,
+            ..self.clone()
         }
     }
 
     pub(crate) fn is_installed(&self) -> bool {
-        self.managed_exe.exists() || self.fallback_exe.exists()
+        match &self.custom_exe {
+            Some(exe) => exe.is_file(),
+            None => self.managed_exe.exists() || self.fallback_exe.exists(),
+        }
     }
 
     /// `resolve_cwd` returns the directory to run Vale from, if we have one.
@@ -176,6 +201,12 @@ impl ValeManager {
     /// `install_or_update` checks if Vale is installed and, if so, checks if it's
     /// the latest version.
     pub(crate) fn install_or_update(&self) -> Result<String, Error> {
+        if let Some(exe) = &self.custom_exe {
+            // Managing a binary we've been told not to use would download it
+            // for nothing -- and, worse, imply we might run it.
+            return Ok(format!("Using {}; skipping install.", exe.display()));
+        }
+
         let newer = self.newer_version()?;
         if newer.is_some() {
             let v = newer.unwrap();
@@ -323,6 +354,16 @@ impl ValeManager {
     }
 
     fn exe_path(&self, managed: bool) -> Result<PathBuf, Error> {
+        if let Some(exe) = &self.custom_exe {
+            if exe.is_file() {
+                return Ok(exe.clone());
+            }
+            return Err(Error::from(format!(
+                "Configured Vale binary not found: {}",
+                exe.display()
+            )));
+        }
+
         if self.managed_exe.exists() {
             return Ok(self.managed_exe.clone());
         } else if self.fallback_exe.exists() && !managed {
@@ -419,6 +460,36 @@ mod tests {
 
         let v2 = Version::parse(&mgr.fetch_version().unwrap()).unwrap();
         assert!(v2 >= Version::parse("2.0.0").unwrap());
+    }
+
+    #[test]
+    fn custom_exe_is_never_substituted() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("vale");
+        std::fs::write(&exe, "").unwrap();
+
+        let mgr = ValeManager::new().pinned_to(Some(exe.clone()));
+        assert!(mgr.is_installed());
+        assert_eq!(mgr.exe_path(false).unwrap(), exe);
+
+        // A pinned binary that isn't there is an error, not a fall back to
+        // the managed or `PATH` copy.
+        let missing = dir.path().join("nope");
+        let mgr = ValeManager::new().pinned_to(Some(missing.clone()));
+
+        assert!(!mgr.is_installed());
+        assert!(mgr.exe_path(false).is_err());
+        assert!(mgr
+            .exe_path(false)
+            .unwrap_err()
+            .to_string()
+            .contains(missing.to_str().unwrap()));
+
+        // ...and we don't download one it was told not to use.
+        assert!(mgr
+            .install_or_update()
+            .unwrap()
+            .contains("skipping install"));
     }
 
     #[test]
