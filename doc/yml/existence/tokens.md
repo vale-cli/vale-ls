@@ -1,8 +1,10 @@
 ```yaml
-# becomes \b(?:appears to be|arguably)\b
+# becomes (?m)\b(?:appears to be|arguably)\b after compilation
 tokens:
-    - '(?:foo)\sbar'
-    - '(baz)'
+  - appears to be
+  - arguably
 ```
 
-A list of tokens to be transformed into a non-capturing group.
+A list of strings or regular expressions to be transformed into a word-bounded, non-capturing group.
+
+When `ignorecase: true`, compilation also adds the `(?i)` flag.

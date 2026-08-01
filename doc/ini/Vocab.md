@@ -8,7 +8,7 @@ of your styles.
 ```bash
 StylesPath = "..."
 
-# Here's were we define the exceptions to use in *all*
+# Here's where we define the exceptions to use in *all*
 # `BasedOnStyles`.
 Vocab = Some-Name
 
