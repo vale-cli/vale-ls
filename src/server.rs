@@ -378,85 +378,20 @@ impl LanguageServer for Backend {
     }
 
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
-        if params.context.diagnostics.is_empty() {
+        let mut actions = vec![];
+
+        // A position usually carries more than one alert, and only some of
+        // them are fixable -- so looking at the first one alone hid whatever
+        // the others had to offer.
+        for diagnostic in params.context.diagnostics.iter() {
+            actions.append(&mut self.actions_for(&params, diagnostic).await);
+        }
+
+        if actions.is_empty() {
             return Ok(None);
         }
 
-        let diagnostics = params.context.diagnostics[0].data.as_ref();
-        if diagnostics.is_none() {
-            // TODO: What case is this?
-            //
-            // See https://github.com/ChrisChinchilla/vale-vscode/issues/48
-            return Ok(None);
-        }
-
-        let s = serde_json::to_string(diagnostics.unwrap()).unwrap();
-        let alert: vale::ValeAlert = match serde_json::from_str(&s) {
-            Ok(alert) => alert,
-            Err(_) => return Ok(None),
-        };
-
-        // Offered even when Vale has no replacement to suggest, so these are
-        // built before (and independently of) the fixes below.
-        let vocab = self
-            .vocab_actions(&params, &alert)
-            .into_iter()
-            .map(CodeActionOrCommand::CodeAction)
-            .collect::<Vec<_>>();
-
-        let uri = &params.text_document.uri;
-        match self.vale().fix(&s, self.config_path(), self.root_for(uri)) {
-            Ok(fixed) => {
-                let mut range = utils::alert_to_range(alert.clone());
-
-                if !alert.action.name.is_some() {
-                    return Ok(Some(vocab));
-                }
-
-                let action_name = alert.action.name.unwrap();
-                if action_name == "remove" {
-                    // NOTE: we need to add a character when deleting to avoid
-                    // leaving a double space.
-                    range.end.character += 1;
-                }
-
-                let mut fixes = vocab;
-                for fix in fixed.suggestions {
-                    fixes.push(CodeActionOrCommand::CodeAction(CodeAction {
-                        title: utils::make_title(
-                            action_name.clone(),
-                            alert.matched.clone(),
-                            fix.clone(),
-                        ),
-                        kind: Some(CodeActionKind::QUICKFIX),
-                        diagnostics: Some(params.context.diagnostics.clone()),
-                        edit: Some(WorkspaceEdit {
-                            changes: Some(
-                                [(
-                                    params.text_document.uri.clone(),
-                                    vec![TextEdit {
-                                        range: range,
-                                        new_text: fix,
-                                    }],
-                                )]
-                                .iter()
-                                .cloned()
-                                .collect(),
-                            ),
-                            ..WorkspaceEdit::default()
-                        }),
-                        ..CodeAction::default()
-                    }));
-                }
-                Ok(Some(fixes))
-            }
-            Err(e) => {
-                self.client
-                    .log_message(MessageType::ERROR, format!("Error: {}", e))
-                    .await;
-                Ok(Some(vocab))
-            }
-        }
+        Ok(Some(actions))
     }
 }
 
@@ -821,11 +756,106 @@ impl Backend {
         "".to_string()
     }
 
+    /// `actions_for` returns what we can offer for a single alert.
+    async fn actions_for(
+        &self,
+        params: &CodeActionParams,
+        diagnostic: &Diagnostic,
+    ) -> Vec<CodeActionOrCommand> {
+        let data = match &diagnostic.data {
+            Some(data) => data,
+            // Not every client sends our data back.
+            //
+            // See https://github.com/ChrisChinchilla/vale-vscode/issues/48
+            None => return vec![],
+        };
+
+        let alert = serde_json::to_string(data).ok().and_then(|s| {
+            serde_json::from_str::<vale::ValeAlert>(&s)
+                .ok()
+                .map(|a| (s, a))
+        });
+
+        let (raw, alert) = match alert {
+            Some(alert) => alert,
+            None => return vec![],
+        };
+
+        // Offered even when Vale has no replacement to suggest.
+        let mut actions: Vec<CodeActionOrCommand> = self
+            .vocab_actions(params, &alert, diagnostic)
+            .into_iter()
+            .map(CodeActionOrCommand::CodeAction)
+            .collect();
+
+        // Most alerts carry no action -- a rule that only flags a word has
+        // nothing to put in its place -- and asking Vale to fix one of those
+        // costs a process to be told so.
+        let action = alert.action.name.clone().unwrap_or_default();
+        if action.is_empty() {
+            return actions;
+        }
+
+        let uri = &params.text_document.uri;
+        let fixed = match self
+            .vale()
+            .fix(&raw, self.config_path(), self.root_for(uri))
+        {
+            Ok(fixed) => fixed,
+            Err(e) => {
+                self.client
+                    .log_message(MessageType::ERROR, format!("Error: {}", e))
+                    .await;
+                return actions;
+            }
+        };
+
+        let mut range = utils::alert_to_range(alert.clone());
+        if action == "remove" {
+            // NOTE: we need to add a character when deleting to avoid
+            // leaving a double space.
+            range.end.character += 1;
+        }
+
+        for fix in fixed.suggestions {
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: utils::make_title(action.clone(), alert.matched.clone(), fix.clone()),
+                kind: Some(CodeActionKind::QUICKFIX),
+                // The alert this resolves, rather than everything the client
+                // happened to send.
+                diagnostics: Some(vec![diagnostic.clone()]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(
+                        [(
+                            uri.clone(),
+                            vec![TextEdit {
+                                range,
+                                new_text: fix,
+                            }],
+                        )]
+                        .iter()
+                        .cloned()
+                        .collect(),
+                    ),
+                    ..WorkspaceEdit::default()
+                }),
+                ..CodeAction::default()
+            }));
+        }
+
+        actions
+    }
+
     /// `vocab_actions` offers to add a flagged term to a vocabulary.
     ///
     /// A project can have more than one active vocabulary, so we offer each of
     /// them rather than guessing which one the user meant.
-    fn vocab_actions(&self, params: &CodeActionParams, alert: &vale::ValeAlert) -> Vec<CodeAction> {
+    fn vocab_actions(
+        &self,
+        params: &CodeActionParams,
+        alert: &vale::ValeAlert,
+        diagnostic: &Diagnostic,
+    ) -> Vec<CodeAction> {
         let spelling = alert
             .action
             .params
@@ -848,7 +878,7 @@ impl Backend {
             .map(|name| CodeAction {
                 title: format!("Add '{}' to the '{}' vocabulary", alert.matched, name),
                 kind: Some(CodeActionKind::QUICKFIX),
-                diagnostics: Some(params.context.diagnostics.clone()),
+                diagnostics: Some(vec![diagnostic.clone()]),
                 command: Some(Command {
                     title: "Add to vocabulary".to_string(),
                     command: "vocab.add".to_string(),
