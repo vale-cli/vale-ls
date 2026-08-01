@@ -178,6 +178,7 @@ impl Rule {
         let example = include_str!("../doc/yml/substitution/example.md");
         match key {
             "ignorecase" => Some(include_str!("../doc/yml/substitution/ignorecase.md").into()),
+            "pos" => Some(include_str!("../doc/yml/substitution/pos.md").into()),
             "nonword" => Some(include_str!("../doc/yml/substitution/nonword.md").into()),
             "exceptions" => Some(include_str!("../doc/yml/substitution/exceptions.md").into()),
             "swap" => Some(include_str!("../doc/yml/substitution/swap.md").into()),
@@ -276,6 +277,7 @@ impl Rule {
             "ignore" => Some(include_str!("../doc/yml/spelling/ignore.md").into()),
             "aff" => Some(include_str!("../doc/yml/spelling/aff.md").into()),
             "dic" => Some(include_str!("../doc/yml/spelling/dic.md").into()),
+            "exceptions" => Some(include_str!("../doc/yml/spelling/exceptions.md").into()),
             _ => self.common(key, example),
         }
     }
@@ -287,6 +289,7 @@ impl Rule {
             "tokens" => Some(include_str!("../doc/yml/sequence/tokens.md").into()),
             "negate" => Some(include_str!("../doc/yml/sequence/negate.md").into()),
             "skip" => Some(include_str!("../doc/yml/sequence/skip.md").into()),
+            "model" => Some(include_str!("../doc/yml/sequence/model.md").into()),
             _ => self.common(key, example),
         }
     }
