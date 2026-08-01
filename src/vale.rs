@@ -2,7 +2,7 @@ use core::fmt;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::{env, io, path};
 
 use flate2::read::GzDecoder;
@@ -225,7 +225,54 @@ impl ValeManager {
         }
     }
 
-    /// `run` executes Vale with the given arguments.
+    /// `run_buffer` lints text that hasn't been written to disk yet.
+    ///
+    /// Vale reads the buffer from stdin but still resolves configuration and
+    /// syntax from `--path`, so the results match what linting the saved file
+    /// would produce.
+    pub(crate) fn run_buffer(
+        &self,
+        text: String,
+        fp: PathBuf,
+        config_path: String,
+        filter: String,
+    ) -> Result<HashMap<String, Vec<ValeAlert>>, Error> {
+        let mut args = self.args.clone();
+
+        if config_path != "" {
+            args.push(format!("--config={}", config_path));
+        }
+        if filter != "" {
+            args.push(format!("--filter={}", filter));
+        }
+        args.push(format!("--path={}", fp.as_path().display()));
+
+        let exe = self.exe_path(false)?;
+        let mut cmd = Command::new(exe.as_os_str());
+        if let Some(dir) = fp
+            .parent()
+            .and_then(|p| Self::resolve_cwd(&p.to_string_lossy()))
+        {
+            cmd.current_dir(dir);
+        }
+
+        let mut child = cmd
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::from("Failed to open Vale's stdin."))?
+            .write_all(text.as_bytes())?;
+
+        self.parse_output(child.wait_with_output()?)
+    }
+
+    /// `run` executes Vale over a file on disk.
     ///
     /// If `filter` is not empty, it will be passed to Vale as `--filter`.
     pub(crate) fn run(

@@ -1,5 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashMap;
 use ropey::Rope;
@@ -26,6 +28,9 @@ pub struct Backend {
     pub document_map: DashMap<String, Rope>,
     pub param_map: DashMap<String, Value>,
     pub cli: vale::ValeManager,
+    /// The newest version we've seen of each open document, so that a
+    /// debounced lint can tell whether it's already been superseded.
+    pub versions: Arc<DashMap<String, i32>>,
 }
 
 #[tower_lsp::async_trait]
@@ -119,10 +124,15 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, mut params: DidChangeTextDocumentParams) {
+        let uri = params.text_document.uri;
+        let text = std::mem::take(&mut params.content_changes[0].text);
+
         self.update(TextDocumentItem {
-            uri: params.text_document.uri,
-            text: std::mem::take(&mut params.content_changes[0].text),
+            uri: uri.clone(),
+            text: text.clone(),
         });
+
+        self.schedule_lint(uri, text, params.text_document.version);
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
@@ -456,6 +466,72 @@ impl Backend {
         self.lint(&uri).await;
     }
 
+    /// `schedule_lint` lints an edited buffer once the typing settles.
+    ///
+    /// Waiting for a save means diagnostics lag behind the buffer, which
+    /// breaks editor workflows that gate on a clean document. Linting every
+    /// keystroke would spawn a Vale process per character, so a later edit
+    /// cancels the one in flight.
+    fn schedule_lint(&self, uri: Url, text: String, version: i32) {
+        if !self.should_lint_on_change() {
+            return;
+        }
+
+        let fp = match uri.to_file_path() {
+            Ok(fp) => fp,
+            Err(_) => return,
+        };
+
+        self.versions.insert(uri.to_string(), version);
+
+        let versions = self.versions.clone();
+        let client = self.client.clone();
+        let cli = self.vale();
+        let config_path = self.config_path();
+        let filter = self.config_filter();
+        let delay = self.debounce();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+
+            // A newer edit arrived while we waited; it owns the next lint.
+            if versions.get(uri.as_str()).map(|v| *v) != Some(version) {
+                return;
+            }
+
+            let linted =
+                tokio::task::spawn_blocking(move || cli.run_buffer(text, fp, config_path, filter))
+                    .await;
+
+            let result = match linted {
+                Ok(result) => result,
+                Err(_) => return,
+            };
+
+            match result {
+                Ok(result) => {
+                    let diagnostics = result
+                        .values()
+                        .flatten()
+                        .map(utils::alert_to_diagnostic)
+                        .collect();
+
+                    // Still current? The lint itself takes time, too.
+                    if versions.get(uri.as_str()).map(|v| *v) == Some(version) {
+                        client
+                            .publish_diagnostics(uri, diagnostics, Some(version))
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    client
+                        .log_message(MessageType::ERROR, format!("Parsing error: {:?}", e))
+                        .await;
+                }
+            }
+        });
+    }
+
     /// `lint` runs Vale over `uri` and publishes what it reports.
     ///
     /// Vale reads the file from disk, so this doesn't need the document's
@@ -573,6 +649,20 @@ impl Backend {
     /// lens is the only thing our advertised `codeLensProvider` offers.
     fn should_show_metrics(&self) -> bool {
         self.get_setting("showMetrics") != Some(Value::Bool(false))
+    }
+
+    fn should_lint_on_change(&self) -> bool {
+        self.get_setting("lintOnChange") != Some(Value::Bool(false))
+    }
+
+    /// How long typing has to settle before we lint, in milliseconds.
+    fn debounce(&self) -> Duration {
+        let ms = self
+            .get_setting("debounceMs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(300);
+
+        Duration::from_millis(ms)
     }
 
     /// `root_path` returns the directory we run Vale from when we have no

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use dashmap::DashMap;
@@ -31,6 +32,7 @@ async fn main() {
         document_map: DashMap::new(),
         param_map: DashMap::new(),
         cli: ValeManager::with_custom_exe(args.vale_binary),
+        versions: Arc::new(DashMap::new()),
     })
     .finish();
 
