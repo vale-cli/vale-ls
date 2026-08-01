@@ -44,18 +44,31 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: aarch64-unknown-linux-gnu
+          # The Linux binaries are built against glibc 2.17 so that they run on
+          # distributions older than the runner. Building them natively links
+          # against the runner's glibc, which leaves anything older -- Ubuntu
+          # 22.04, for one -- unable to start the binary at all.
+          #
+          # cargo-zigbuild reads the `.2.17` suffix; the archive is still named
+          # for the plain target triple.
+          - target: aarch64-unknown-linux-gnu.2.17
             os: ubuntu-latest
+            build-tool: cargo-zigbuild
           - target: aarch64-apple-darwin
             os: macos-latest
+            build-tool: cargo
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-          - target: x86_64-unknown-linux-gnu
+            build-tool: cargo
+          - target: x86_64-unknown-linux-gnu.2.17
             os: ubuntu-latest
+            build-tool: cargo-zigbuild
           - target: x86_64-apple-darwin
             os: macos-latest
+            build-tool: cargo
           - target: x86_64-pc-windows-gnu
             os: windows-latest
+            build-tool: cargo
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v3
@@ -66,6 +79,8 @@ jobs:
           bin: vale-ls
           # (optional) Target triple, default is host triple.
           target: ${{ matrix.target }}
+          # (optional) Tool to build binaries (cargo, cross, or cargo-zigbuild).
+          build-tool: ${{ matrix.build-tool }}
           # (required) GitHub token for uploading assets to GitHub Releases.
           token: ${{ secrets.GITHUB_TOKEN }}
           zip: all

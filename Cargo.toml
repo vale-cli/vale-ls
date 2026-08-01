@@ -12,7 +12,7 @@ thiserror = "1.0"
 flate2 = "1.0.25"
 im-rc = "15.0.0"
 log = "0.4.14"
-reqwest = {version = "0.11", features = ["json", "blocking"]}
+reqwest = {version = "0.11", default-features = false, features = ["json", "blocking", "rustls-tls-native-roots"]}
 ropey = "1.5.0"
 semver = "1.0.17"
 serde = {version = "1.0", features = ["derive"]}
@@ -26,6 +26,3 @@ yaml-rust = "0.4.5"
 zip-extract = "0.1.2"
 regex = "1.7.3"
 open = "4.0.1"
-
-[target.'cfg(unix)'.dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
