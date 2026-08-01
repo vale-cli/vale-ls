@@ -1,5 +1,5 @@
 use core::fmt;
-use std::{fs, path::PathBuf};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use crate::error::Error;
 
@@ -20,7 +20,7 @@ pub struct PathEntry {
 
 #[derive(Debug)]
 pub struct StylesPath {
-    root: PathBuf,
+    roots: Vec<PathBuf>,
 }
 
 impl fmt::Display for EntryType {
@@ -33,18 +33,21 @@ impl fmt::Display for EntryType {
     }
 }
 
-/// `StylesPath` provides an interface for managing a directory of styles.
+/// `StylesPath` provides an interface for managing one or more directories of
+/// styles.
 impl StylesPath {
-    pub fn new(root: PathBuf) -> StylesPath {
-        StylesPath { root }
+    pub fn new(roots: Vec<PathBuf>) -> StylesPath {
+        StylesPath { roots }
     }
 
     pub fn set_path(&mut self, path: PathBuf) {
-        self.root = path;
+        self.roots = vec![path];
     }
 
+    /// The project-specific styles directory -- i.e., the last path Vale
+    /// searches.
     pub fn path(&self) -> PathBuf {
-        self.root.clone()
+        self.roots.last().cloned().unwrap_or_default()
     }
 
     pub fn add_to_accept(&self, name: &str, term: &str) -> Result<(), Error> {
@@ -83,15 +86,25 @@ impl StylesPath {
 
     fn get(&self, kind: EntryType) -> Result<Vec<PathEntry>, Error> {
         let idx = self.index()?;
+        let mut seen = HashSet::new();
+
+        // A style or vocab may live in more than one search path; `index`
+        // yields the most specific one first, so we keep that.
         Ok(idx
             .into_iter()
             .filter(|e| e.kind == kind)
-            .map(|e| e.clone())
+            .filter(|e| seen.insert(e.name.clone()))
             .collect())
     }
 
     fn add_to_vocab(&self, name: &str, term: &str, accept: bool) -> Result<(), Error> {
-        let mut path = self.root.join("Vocab").join(name);
+        let root = self.path();
+
+        // `Vocab` is the pre-v3 location of `config/vocabularies`.
+        let mut path = root.join("config").join("vocabularies").join(name);
+        if !path.is_dir() {
+            path = root.join("Vocab").join(name);
+        }
 
         if accept {
             path = path.join("accept.txt");
@@ -112,26 +125,42 @@ impl StylesPath {
     }
 
     fn index(&self) -> Result<Vec<PathEntry>, Error> {
-        let subdirs = fs::read_dir(self.path())?;
         let mut entries = Vec::new();
 
-        for path in subdirs {
-            let subdir = path?;
-            let path = subdir.path();
-
-            let dir_name = self.entry_name(path.clone());
-            if dir_name == ".vale-config" {
+        // Most specific search path first, so that `get` reports the entry
+        // Vale would actually use when a name appears in more than one.
+        for root in self.roots.iter().rev() {
+            // Vale reports all of its search paths, some of which may not
+            // exist yet (e.g., a global styles directory).
+            if !root.is_dir() {
                 continue;
-            } else if dir_name == "Vocab" && path.is_dir() {
-                entries.append(&mut self.index_dir(path.clone(), EntryType::Vocab)?);
-            } else if path.is_dir() {
-                entries.push(PathEntry {
-                    name: dir_name,
-                    size: fs::read_dir(path.clone()).unwrap().count(),
-                    path: path.clone(),
-                    kind: EntryType::Style,
-                });
-                entries.append(&mut self.index_dir(path.clone(), EntryType::Rule)?);
+            }
+
+            for path in fs::read_dir(root)? {
+                let subdir = path?;
+                let path = subdir.path();
+
+                let dir_name = self.entry_name(path.clone());
+                if dir_name == ".vale-config" {
+                    continue;
+                } else if dir_name == "config" && path.is_dir() {
+                    // Vale >= 3.0 keeps vocabularies (and other assets) in
+                    // `config/`, which isn't a style.
+                    let vocab = path.join("vocabularies");
+                    if vocab.is_dir() {
+                        entries.append(&mut self.index_dir(vocab, EntryType::Vocab)?);
+                    }
+                } else if dir_name == "Vocab" && path.is_dir() {
+                    entries.append(&mut self.index_dir(path.clone(), EntryType::Vocab)?);
+                } else if path.is_dir() {
+                    entries.push(PathEntry {
+                        name: dir_name,
+                        size: fs::read_dir(path.clone()).unwrap().count(),
+                        path: path.clone(),
+                        kind: EntryType::Style,
+                    });
+                    entries.append(&mut self.index_dir(path.clone(), EntryType::Rule)?);
+                }
             }
         }
 
@@ -178,7 +207,7 @@ mod tests {
 
     #[test]
     fn index() {
-        let p = StylesPath::new(PathBuf::from(STYLES));
+        let p = StylesPath::new(vec![PathBuf::from(STYLES)]);
 
         assert_eq!(p.count(EntryType::Style).unwrap(), 2);
         assert_eq!(p.count(EntryType::Rule).unwrap(), 8);
@@ -193,5 +222,43 @@ mod tests {
 
         assert_eq!(style.name, "Test");
         assert_eq!(style.size, 1);
+    }
+
+    #[test]
+    fn index_skips_missing_paths() {
+        let p = StylesPath::new(vec![PathBuf::from("does-not-exist"), PathBuf::from(STYLES)]);
+
+        assert_eq!(p.count(EntryType::Style).unwrap(), 2);
+        assert_eq!(p.count(EntryType::Rule).unwrap(), 8);
+        assert_eq!(p.count(EntryType::Vocab).unwrap(), 1);
+    }
+
+    #[test]
+    fn modern_vocab_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("config").join("vocabularies").join("Proj")).unwrap();
+        fs::create_dir_all(root.join("MyStyle")).unwrap();
+        fs::write(root.join("MyStyle").join("Rule.yml"), "extends: existence").unwrap();
+
+        let p = StylesPath::new(vec![root.to_path_buf()]);
+
+        // `config` holds vocabularies, dictionaries, etc. -- not styles.
+        assert_eq!(p.count(EntryType::Style).unwrap(), 1);
+        assert_eq!(p.count(EntryType::Rule).unwrap(), 1);
+
+        let vocab = p.get_vocab().unwrap();
+        assert_eq!(vocab.len(), 1);
+        assert_eq!(vocab[0].name, "Proj");
+    }
+
+    #[test]
+    fn duplicates_are_reported_once() {
+        let p = StylesPath::new(vec![PathBuf::from(STYLES), PathBuf::from(STYLES)]);
+
+        // "Vale" is built in, so it's always included.
+        assert_eq!(p.get_styles().unwrap().len(), 3);
+        assert_eq!(p.get_vocab().unwrap().len(), 1);
     }
 }

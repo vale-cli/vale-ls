@@ -27,7 +27,7 @@ pub fn key_to_info(key: &str) -> Option<&str> {
     }
 }
 
-pub async fn complete(line: &str, styles: PathBuf) -> Result<Vec<CompletionItem>, Error> {
+pub async fn complete(line: &str, styles: Vec<PathBuf>) -> Result<Vec<CompletionItem>, Error> {
     let mut completions = Vec::new();
     let re = Regex::new(r"\w+\.\w+ =").unwrap();
 
@@ -70,7 +70,7 @@ async fn get_pkgs(line: &str) -> Result<Vec<CompletionItem>, Error> {
     Ok(completions)
 }
 
-fn get_vocab(line: &str, styles: PathBuf) -> Result<Vec<CompletionItem>, Error> {
+fn get_vocab(line: &str, styles: Vec<PathBuf>) -> Result<Vec<CompletionItem>, Error> {
     let p = StylesPath::new(styles);
 
     let completions = p
@@ -83,7 +83,7 @@ fn get_vocab(line: &str, styles: PathBuf) -> Result<Vec<CompletionItem>, Error> 
     Ok(completions)
 }
 
-fn get_styles(line: &str, styles: PathBuf) -> Result<Vec<CompletionItem>, Error> {
+fn get_styles(line: &str, styles: Vec<PathBuf>) -> Result<Vec<CompletionItem>, Error> {
     let p = StylesPath::new(styles);
 
     let completions = p

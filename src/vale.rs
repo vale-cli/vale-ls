@@ -23,7 +23,25 @@ const LATEST: &str = "https://api.github.com/repos/errata-ai/vale/releases/lates
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub(crate) struct ValeConfig {
-    pub styles_path: PathBuf,
+    /// Every directory Vale searches for styles, ordered from most general
+    /// (e.g., the global styles directory) to most specific (the project's
+    /// own `StylesPath`).
+    #[serde(default)]
+    pub paths: Vec<PathBuf>,
+    /// The project's `StylesPath`, as reported by older versions of Vale that
+    /// predate `Paths`.
+    #[serde(default)]
+    pub styles_path: Option<PathBuf>,
+}
+
+impl ValeConfig {
+    /// The directories to search for styles, vocabularies, and rules.
+    pub fn styles_paths(&self) -> Vec<PathBuf> {
+        if !self.paths.is_empty() {
+            return self.paths.clone();
+        }
+        self.styles_path.clone().into_iter().collect()
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -380,5 +398,30 @@ mod tests {
 
         let v2 = Version::parse(&mgr.fetch_version().unwrap()).unwrap();
         assert!(v2 >= Version::parse("2.0.0").unwrap());
+    }
+
+    #[test]
+    fn config_paths() {
+        let cfg: ValeConfig = serde_json::from_str(
+            r#"{"RootINI": "/p/.vale.ini", "Paths": ["/global", "/p/styles"]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            cfg.styles_paths(),
+            vec![PathBuf::from("/global"), PathBuf::from("/p/styles")]
+        );
+    }
+
+    #[test]
+    fn config_legacy_styles_path() {
+        let cfg: ValeConfig = serde_json::from_str(r#"{"StylesPath": "/p/styles"}"#).unwrap();
+        assert_eq!(cfg.styles_paths(), vec![PathBuf::from("/p/styles")]);
+    }
+
+    #[test]
+    fn config_without_styles() {
+        let cfg: ValeConfig = serde_json::from_str("{}").unwrap();
+        assert!(cfg.styles_paths().is_empty());
     }
 }

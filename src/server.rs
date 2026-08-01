@@ -269,7 +269,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        let styles = config.unwrap().styles_path;
+        let styles = config.unwrap().styles_paths();
         match ext.as_str() {
             "ini" => match ini::complete(line, styles).await {
                 Ok(computed) => {
@@ -506,7 +506,7 @@ impl Backend {
         } else if ext == "yml" {
             let config = self.cli.config(self.config_path(), self.root_path());
             if config.is_ok() {
-                let styles = config.unwrap().styles_path;
+                let styles = config.unwrap().styles_paths();
                 let p = styles::StylesPath::new(styles);
                 if p.has(uri.path()).unwrap_or(false) {
                     return "yml".to_string();
