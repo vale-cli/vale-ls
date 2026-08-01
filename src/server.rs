@@ -1,4 +1,5 @@
 use std::env;
+use std::path::{Path, PathBuf};
 
 use dashmap::DashMap;
 use ropey::Rope;
@@ -30,12 +31,7 @@ pub struct Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        // TODO: Workspace folders / settings
-        self.param_map.insert(
-            "root".to_string(),
-            Value::String(Backend::workspace_root(&params)),
-        );
-
+        self.set_roots(Backend::workspace_roots(&params));
         self.init(params.initialization_options).await;
         Ok(InitializeResult {
             server_info: None,
@@ -234,13 +230,32 @@ impl LanguageServer for Backend {
         Ok(None)
     }
 
-    async fn did_change_configuration(&self, _: DidChangeConfigurationParams) {
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        self.parse_params(Backend::settings_object(params.settings));
         self.client
             .log_message(MessageType::INFO, "configuration changed!")
             .await;
     }
 
-    async fn did_change_workspace_folders(&self, _: DidChangeWorkspaceFoldersParams) {
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        let mut roots = self.roots();
+
+        for folder in params.event.removed {
+            if let Ok(path) = folder.uri.to_file_path() {
+                roots.retain(|root| Path::new(root) != path);
+            }
+        }
+
+        for folder in params.event.added {
+            if let Ok(path) = folder.uri.to_file_path() {
+                let path = path.to_string_lossy().to_string();
+                if !roots.contains(&path) {
+                    roots.push(path);
+                }
+            }
+        }
+
+        self.set_roots(roots);
         self.client
             .log_message(MessageType::INFO, "workspace folders changed!")
             .await;
@@ -260,7 +275,7 @@ impl LanguageServer for Backend {
         let context = rope.line(position.line as usize);
         let line = context.as_str().to_owned().unwrap_or("");
 
-        let config = self.cli.config(self.config_path(), self.root_path());
+        let config = self.cli.config(self.config_path(), self.root_for(&uri));
         if config.is_err() {
             return Ok(None);
         }
@@ -456,34 +471,107 @@ impl Backend {
         self.get_setting("syncOnStartup") == Some(Value::Bool(true))
     }
 
+    /// `root_path` returns the directory we run Vale from when we have no
+    /// document to resolve against (e.g., a sync on startup).
     fn root_path(&self) -> String {
-        self.get_string("root")
+        let explicit = self.get_string("root");
+        if !explicit.is_empty() {
+            return explicit;
+        }
+        self.roots().first().cloned().unwrap_or_default()
     }
 
-    /// `workspace_root` returns the directory we run Vale from.
+    /// `root_for` returns the directory we run Vale from for a given document.
     ///
-    /// `rootUri` is deprecated and not every client sends it, so we fall back
-    /// to the first workspace folder and then to our own working directory --
+    /// A multi-root workspace may hold projects with different `.vale.ini`
+    /// files, so we resolve against the folder the document lives in -- the
+    /// innermost one, if they're nested.
+    fn root_for(&self, uri: &Url) -> String {
+        match uri.to_file_path() {
+            Ok(path) => self.root_for_path(&path),
+            Err(_) => self.root_path(),
+        }
+    }
+
+    fn root_for_path(&self, path: &Path) -> String {
+        let explicit = self.get_string("root");
+        if !explicit.is_empty() {
+            return explicit;
+        }
+
+        Backend::best_root(&self.roots(), path).unwrap_or_else(|| self.root_path())
+    }
+
+    /// `best_root` returns the innermost of `roots` that contains `path`.
+    fn best_root(roots: &[String], path: &Path) -> Option<String> {
+        roots
+            .iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.len())
+            .cloned()
+    }
+
+    fn roots(&self) -> Vec<String> {
+        match self.get_setting("roots") {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn set_roots(&self, roots: Vec<String>) {
+        self.param_map.insert(
+            "roots".to_string(),
+            Value::Array(roots.into_iter().map(Value::String).collect()),
+        );
+    }
+
+    /// `workspace_roots` returns the directories the client opened.
+    ///
+    /// `rootUri` is deprecated and not every client sends it, so we prefer
+    /// `workspaceFolders` and fall back to our own working directory --
     /// leaving this empty makes every Vale invocation fail to spawn.
-    fn workspace_root(params: &InitializeParams) -> String {
-        let from_uri = params
+    fn workspace_roots(params: &InitializeParams) -> Vec<String> {
+        let from_folders: Vec<PathBuf> = params
+            .workspace_folders
+            .iter()
+            .flatten()
+            .filter_map(|f| f.uri.to_file_path().ok())
+            .collect();
+
+        if !from_folders.is_empty() {
+            return from_folders
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect();
+        }
+
+        params
             .root_uri
             .as_ref()
-            .and_then(|uri| uri.to_file_path().ok());
+            .and_then(|uri| uri.to_file_path().ok())
+            .or_else(|| env::current_dir().ok())
+            .map(|path| vec![path.to_string_lossy().to_string()])
+            .unwrap_or_default()
+    }
 
-        let from_folders = || {
-            params
-                .workspace_folders
-                .as_ref()?
-                .first()
-                .and_then(|f| f.uri.to_file_path().ok())
+    /// `settings_object` unwraps the settings a client pushed to us.
+    ///
+    /// Some clients send our settings verbatim; others scope them under a
+    /// section name.
+    fn settings_object(settings: Value) -> Option<Value> {
+        let map = match settings {
+            Value::Object(map) => map,
+            _ => return None,
         };
 
-        from_uri
-            .or_else(from_folders)
-            .or_else(|| env::current_dir().ok())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_default()
+        if let Some(scoped @ Value::Object(_)) = map.get("vale") {
+            return Some(scoped.clone());
+        }
+
+        Some(Value::Object(map))
     }
 
     fn parse_params(&self, params: Option<Value>) {
@@ -526,7 +614,7 @@ impl Backend {
         if uri.path().contains(".vale.ini") {
             return "ini".to_string();
         } else if ext == "yml" {
-            let config = self.cli.config(self.config_path(), self.root_path());
+            let config = self.cli.config(self.config_path(), self.root_for(&uri));
             if config.is_ok() {
                 let styles = config.unwrap().styles_paths();
                 let p = styles::StylesPath::new(styles);
@@ -577,7 +665,7 @@ impl Backend {
 
         let resp = self.cli.upload_rule(
             self.config_path(),
-            self.root_path(),
+            self.root_for_path(&uri),
             uri.to_str().unwrap().to_string(),
         );
 
@@ -609,5 +697,99 @@ impl Backend {
                     .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+
+    fn folder(path: &str) -> WorkspaceFolder {
+        WorkspaceFolder {
+            uri: Url::from_directory_path(path).unwrap(),
+            name: path.to_string(),
+        }
+    }
+
+    /// Directory URLs round-trip with a trailing separator, which `Path`
+    /// ignores but `String` doesn't.
+    fn as_paths(params: &InitializeParams) -> Vec<PathBuf> {
+        Backend::workspace_roots(params)
+            .iter()
+            .map(PathBuf::from)
+            .collect()
+    }
+
+    #[test]
+    fn roots_prefer_workspace_folders() {
+        let params = InitializeParams {
+            root_uri: Some(Url::from_directory_path("/one").unwrap()),
+            workspace_folders: Some(vec![folder("/two"), folder("/three")]),
+            ..InitializeParams::default()
+        };
+
+        assert_eq!(
+            as_paths(&params),
+            vec![Path::new("/two"), Path::new("/three")]
+        );
+    }
+
+    #[test]
+    fn roots_fall_back_to_root_uri() {
+        let params = InitializeParams {
+            root_uri: Some(Url::from_directory_path("/one").unwrap()),
+            workspace_folders: Some(vec![]),
+            ..InitializeParams::default()
+        };
+
+        assert_eq!(as_paths(&params), vec![Path::new("/one")]);
+    }
+
+    #[test]
+    fn roots_fall_back_to_our_cwd() {
+        let roots = Backend::workspace_roots(&InitializeParams::default());
+        let cwd = env::current_dir().unwrap().to_string_lossy().to_string();
+
+        // A client that sends neither still has to leave us somewhere to run.
+        assert_eq!(roots, vec![cwd]);
+    }
+
+    #[test]
+    fn innermost_root_wins() {
+        let roots = vec!["/work".to_string(), "/work/docs".to_string()];
+
+        assert_eq!(
+            Backend::best_root(&roots, Path::new("/work/docs/guide.md")),
+            Some("/work/docs".to_string())
+        );
+        assert_eq!(
+            Backend::best_root(&roots, Path::new("/work/README.md")),
+            Some("/work".to_string())
+        );
+        assert_eq!(
+            Backend::best_root(&roots, Path::new("/elsewhere/a.md")),
+            None
+        );
+        // `/workshop` isn't inside `/work`.
+        assert_eq!(
+            Backend::best_root(&roots, Path::new("/workshop/a.md")),
+            None
+        );
+    }
+
+    #[test]
+    fn settings_may_be_scoped() {
+        let scoped = json!({"vale": {"configPath": "/a/.vale.ini"}});
+        assert_eq!(
+            Backend::settings_object(scoped),
+            Some(json!({"configPath": "/a/.vale.ini"}))
+        );
+
+        let flat = json!({"configPath": "/a/.vale.ini"});
+        assert_eq!(Backend::settings_object(flat.clone()), Some(flat));
+
+        assert_eq!(Backend::settings_object(json!("nonsense")), None);
     }
 }
