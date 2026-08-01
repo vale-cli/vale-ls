@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use crate::error::Error;
 
-const PKGS: &str = "https://raw.githubusercontent.com/errata-ai/packages/master/library.json";
+const PKGS: &str = "https://raw.githubusercontent.com/vale-cli/packages/master/library.json";
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Package {

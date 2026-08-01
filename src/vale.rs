@@ -17,8 +17,8 @@ use crate::error::Error;
 use crate::regex101;
 use crate::utils::vale_arch;
 
-const RELEASES: &str = "https://github.com/errata-ai/vale/releases/download";
-const LATEST: &str = "https://api.github.com/repos/errata-ai/vale/releases/latest";
+const RELEASES: &str = "https://github.com/vale-cli/vale/releases/download";
+const LATEST: &str = "https://api.github.com/repos/vale-cli/vale/releases/latest";
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "PascalCase")]

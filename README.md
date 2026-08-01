@@ -75,7 +75,7 @@ version in `Cargo.toml`, so a tag that doesn't match it ships a binary that
 reports the wrong version. The workflow now rejects that.
 
 [1]: https://microsoft.github.io/language-server-protocol/
-[2]: https://github.com/errata-ai/vale
-[3]: https://github.com/errata-ai/vale-ls/releases
+[2]: https://github.com/vale-cli/vale
+[3]: https://github.com/vale-cli/vale-ls/releases
 [4]: https://vale.sh/docs/guides/lsp
 [5]: https://github.com/crate-ci/cargo-release
