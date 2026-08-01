@@ -60,7 +60,22 @@ See the [documentation][4] for more information.
     </tr>
 </table>
 
+## Releasing
+
+Releases are cut with [`cargo release`][5], which bumps `Cargo.toml` and
+`Cargo.lock`, commits, tags, and pushes:
+
+```console
+$ cargo release patch --execute
+```
+
+Pushing the tag triggers [the release workflow](.github/workflows/release.yml),
+which builds the binaries. Don't tag by hand: `vale-ls --version` reports the
+version in `Cargo.toml`, so a tag that doesn't match it ships a binary that
+reports the wrong version. The workflow now rejects that.
+
 [1]: https://microsoft.github.io/language-server-protocol/
 [2]: https://github.com/errata-ai/vale
 [3]: https://github.com/errata-ai/vale-ls/releases
 [4]: https://vale.sh/docs/guides/lsp
+[5]: https://github.com/crate-ci/cargo-release

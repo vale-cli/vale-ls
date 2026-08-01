@@ -9,7 +9,28 @@ on:
       - v[0-9]+.*
 
 jobs:
+  # `vale-ls --version` reports the version in Cargo.toml, so a tag that
+  # doesn't match it ships a binary that lies about which release it is.
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Compare the tag with Cargo.toml
+        run: |
+          # `--locked` (without `--no-deps`, which skips resolution) also
+          # fails if Cargo.lock wasn't updated alongside the bump.
+          tag="${GITHUB_REF_NAME#v}"
+          crate="$(cargo metadata --locked --format-version=1 | jq -r '.packages[] | select(.name == "vale-ls") | .version')"
+
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag '$GITHUB_REF_NAME' doesn't match Cargo.toml version '$crate'; bump the crate (and commit Cargo.lock) before tagging"
+            exit 1
+          fi
+
+          echo "tag '$GITHUB_REF_NAME' matches Cargo.toml version '$crate'"
+
   create-release:
+    needs: verify-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -19,6 +40,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   upload-assets:
+    needs: verify-version
     strategy:
       matrix:
         include:

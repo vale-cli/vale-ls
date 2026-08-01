@@ -1,0 +1,7 @@
+# Config for `cargo release`, which bumps the crate, commits, tags, and
+# pushes -- the tag is what triggers .github/workflows/release.yml.
+#
+# Everything else is left at the default: `publish` is already false (it's
+# read from Cargo.toml) and the default `tag-name` produces `v{{version}}`,
+# which matches the workflow's `v[0-9]+.*` trigger.
+allow-branch = ["main"]
