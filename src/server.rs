@@ -1017,18 +1017,46 @@ impl Backend {
         }
     }
 
+    /// `sync_targets` returns the directories a sync runs from: the explicit
+    /// `root` when one is configured, and every workspace root otherwise --
+    /// in a multi-root workspace each folder may carry its own config and
+    /// `StylesPath`, so syncing only the first left the rest stale.
+    fn sync_targets(explicit: String, roots: Vec<String>) -> Vec<String> {
+        if !explicit.is_empty() {
+            return vec![explicit];
+        }
+        if roots.is_empty() {
+            // No roots at all: run from our own working directory, as before.
+            return vec![String::new()];
+        }
+        roots
+    }
+
     async fn do_sync(&self) {
-        match self.vale().sync(self.config_path(), self.root_path()) {
-            Ok(_) => {
-                self.client
-                    .show_message(MessageType::INFO, "Successfully synced Vale config.")
-                    .await;
+        let targets = Backend::sync_targets(self.get_string("root"), self.roots());
+
+        let mut failures = Vec::new();
+        for root in targets {
+            if let Err(e) = self.vale().sync(self.config_path(), root.clone()) {
+                failures.push(if root.is_empty() {
+                    e.to_string()
+                } else {
+                    format!("{}: {}", root, e)
+                });
             }
-            Err(e) => {
-                self.client
-                    .show_message(MessageType::ERROR, format!("Failed to sync CLI: {}", e))
-                    .await;
-            }
+        }
+
+        if failures.is_empty() {
+            self.client
+                .show_message(MessageType::INFO, "Successfully synced Vale config.")
+                .await;
+        } else {
+            self.client
+                .show_message(
+                    MessageType::ERROR,
+                    format!("Failed to sync CLI: {}", failures.join("; ")),
+                )
+                .await;
         }
     }
 
@@ -1181,6 +1209,27 @@ mod tests {
         assert_eq!(
             Backend::best_root(&roots, Path::new("/workshop/a.md")),
             None
+        );
+    }
+
+    #[test]
+    fn sync_covers_every_root() {
+        // An explicit root wins outright.
+        assert_eq!(
+            Backend::sync_targets("/explicit".to_string(), vec!["/a".to_string()]),
+            vec!["/explicit".to_string()]
+        );
+
+        // Otherwise every workspace root gets its own sync.
+        assert_eq!(
+            Backend::sync_targets(String::new(), vec!["/a".to_string(), "/b".to_string()]),
+            vec!["/a".to_string(), "/b".to_string()]
+        );
+
+        // No roots still leaves the CLI somewhere to run.
+        assert_eq!(
+            Backend::sync_targets(String::new(), vec![]),
+            vec![String::new()]
         );
     }
 
