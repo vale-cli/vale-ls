@@ -126,6 +126,10 @@ pub struct ValeManager {
     pub args: Vec<String>,
     pub arch: String,
 
+    /// Leave out the user-level `.vale.ini`, which Vale otherwise merges into
+    /// every project's configuration, `--config` or not.
+    pub no_global: bool,
+
     pub fallback_exe: PathBuf,
     pub custom_exe: Option<PathBuf>,
 }
@@ -168,6 +172,7 @@ impl ValeManager {
             managed_exe: bin_dir.join(path::Path::new(&exe)),
             args: vec!["--output=JSON".to_string()],
             arch,
+            no_global: false,
             fallback_exe: fallback,
             custom_exe,
         }
@@ -182,6 +187,20 @@ impl ValeManager {
             custom_exe,
             ..self.clone()
         }
+    }
+
+    /// `config_args` returns the flags that choose the configuration:
+    /// `--config` when one is set, and `--no-global` when the user-level
+    /// file is left out.
+    fn config_args(&self, config_path: &str) -> Vec<String> {
+        let mut args = vec![];
+        if !config_path.is_empty() {
+            args.push(format!("--config={}", config_path));
+        }
+        if self.no_global {
+            args.push("--no-global".to_string());
+        }
+        args
     }
 
     pub(crate) fn is_installed(&self) -> bool {
@@ -239,9 +258,7 @@ impl ValeManager {
     ) -> Result<HashMap<String, Vec<ValeAlert>>, Error> {
         let mut args = self.args.clone();
 
-        if config_path != "" {
-            args.push(format!("--config={}", config_path));
-        }
+        args.extend(self.config_args(&config_path));
         if filter != "" {
             args.push(format!("--filter={}", filter));
         }
@@ -284,9 +301,7 @@ impl ValeManager {
         let mut args = self.args.clone();
         let cwd = fp.parent().unwrap();
 
-        if config_path != "" {
-            args.push(format!("--config={}", config_path));
-        }
+        args.extend(self.config_args(&config_path));
         if filter != "" {
             args.push(format!("--filter={}", filter));
         }
@@ -316,10 +331,7 @@ impl ValeManager {
     }
 
     pub(crate) fn sync(&self, config_path: String, cwd: String) -> Result<(), Error> {
-        let mut args = vec![];
-        if config_path != "" {
-            args.push(format!("--config={}", config_path));
-        }
+        let mut args = self.config_args(&config_path);
         args.push("sync".to_string());
 
         let exe = self.exe_path(false)?;
@@ -335,10 +347,7 @@ impl ValeManager {
     }
 
     pub(crate) fn config(&self, config_path: String, cwd: String) -> Result<ValeConfig, Error> {
-        let mut args = vec![];
-        if config_path != "" {
-            args.push(format!("--config={}", config_path));
-        }
+        let mut args = self.config_args(&config_path);
         args.push("ls-config".to_string());
 
         let exe = self.exe_path(false)?;
@@ -360,10 +369,7 @@ impl ValeManager {
         fp: PathBuf,
         config_path: String,
     ) -> Result<serde_json::Map<String, serde_json::Value>, Error> {
-        let mut args = vec![];
-        if config_path != "" {
-            args.push(format!("--config={}", config_path));
-        }
+        let mut args = self.config_args(&config_path);
         args.push("ls-metrics".to_string());
         args.push(fp.as_path().display().to_string());
 
@@ -396,10 +402,7 @@ impl ValeManager {
         let mut file = NamedTempFile::new()?;
         file.write_all(alert.as_bytes())?;
 
-        let mut args = vec![];
-        if config_path != "" {
-            args.push(format!("--config={}", config_path));
-        }
+        let mut args = self.config_args(&config_path);
         args.push("fix".to_string());
         args.push(file.path().display().to_string());
 
@@ -438,11 +441,7 @@ impl ValeManager {
         cwd: String,
         rule: String,
     ) -> Result<CompiledRule, Error> {
-        let mut args = vec![];
-
-        if config_path != "" {
-            args.push(format!("--config={}", config_path));
-        }
+        let mut args = self.config_args(&config_path);
 
         args.push("compile".to_string());
         args.push(rule);
@@ -568,6 +567,20 @@ mod tests {
 
         let v2 = Version::parse(&mgr.fetch_version().unwrap()).unwrap();
         assert!(v2 >= Version::parse("2.0.0").unwrap());
+    }
+
+    #[test]
+    fn config_args() {
+        let mut mgr = ValeManager::new();
+        assert!(mgr.config_args("").is_empty());
+        assert_eq!(mgr.config_args("/a/.vale.ini"), ["--config=/a/.vale.ini"]);
+
+        mgr.no_global = true;
+        assert_eq!(mgr.config_args(""), ["--no-global"]);
+        assert_eq!(
+            mgr.config_args("/a/.vale.ini"),
+            ["--config=/a/.vale.ini", "--no-global"]
+        );
     }
 
     #[test]

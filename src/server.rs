@@ -563,10 +563,15 @@ impl Backend {
     /// resolve it per call rather than at startup.
     fn vale(&self) -> vale::ValeManager {
         let configured = self.get_string("valeBinaryPath");
-        if configured.is_empty() {
-            return self.cli.clone();
-        }
-        self.cli.pinned_to(Some(PathBuf::from(configured)))
+        let mut cli = if configured.is_empty() {
+            self.cli.clone()
+        } else {
+            self.cli.pinned_to(Some(PathBuf::from(configured)))
+        };
+        // Every call takes `--no-global` alike, `ls-config` included, since
+        // its `StylesPath` list is where we resolve styles.
+        cli.no_global = self.get_setting("noGlobal") == Some(Value::Bool(true));
+        cli
     }
 
     fn config_path(&self) -> String {
