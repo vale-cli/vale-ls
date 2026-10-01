@@ -112,6 +112,16 @@ impl LanguageServer for Backend {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        // tower-lsp's `serve` doesn't return on `exit`: it only finishes once
+        // stdin closes. Clients like Neovim send `exit` but keep stdin open
+        // until the process quits, so they'd wait forever. `exit` is the only
+        // valid message after `shutdown`, so leave once the reply has been
+        // written.
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            std::process::exit(0);
+        });
+
         Ok(())
     }
 
