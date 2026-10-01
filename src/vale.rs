@@ -65,6 +65,19 @@ pub(crate) struct ValeError {
     pub text: String,
     pub line: u32,
     pub span: u32,
+    /// E100 for a runtime error, E201 for an invalid value in a file.
+    #[serde(default)]
+    pub code: String,
+}
+
+impl ValeError {
+    /// `parse` reads Vale's JSON error out of what it wrote to stderr. Any
+    /// warnings Vale printed first, as plain W101 lines, come before it.
+    pub fn parse(stderr: &str) -> Option<ValeError> {
+        let start = stderr.find('{')?;
+        let end = stderr.rfind('}')?;
+        serde_json::from_str(stderr.get(start..=end)?).ok()
+    }
 }
 
 impl fmt::Display for ValeError {
@@ -567,6 +580,14 @@ mod tests {
 
         let v2 = Version::parse(&mgr.fetch_version().unwrap()).unwrap();
         assert!(v2 >= Version::parse("2.0.0").unwrap());
+    }
+
+    #[test]
+    fn errors_parse_past_warnings() {
+        let stderr = "W101 'BasedOnStyle' isn't a section option; Vale is ignoring it.\n{\n  \"Line\": 4,\n  \"Path\": \"/a/.vale.ini\",\n  \"Text\": \"msg\",\n  \"Code\": \"E201\",\n  \"Span\": 23\n}\n";
+        let err = ValeError::parse(stderr).unwrap();
+        assert_eq!((err.line, err.span, err.code.as_str()), (4, 23, "E201"));
+        assert!(ValeError::parse("not JSON at all").is_none());
     }
 
     #[test]

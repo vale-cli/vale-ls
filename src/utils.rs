@@ -150,6 +150,55 @@ pub(crate) fn alert_to_diagnostic(alert: &vale::ValeAlert) -> Diagnostic {
     d
 }
 
+/// `error_to_diagnostic` places an error Vale reported in a file -- a
+/// `.vale.ini` or a rule, as an E201 is -- as a diagnostic on that file, from
+/// its column to the end of the line. An error with no position, such as an
+/// E100, has nowhere to go and returns `None`.
+pub(crate) fn error_to_diagnostic(err: &vale::ValeError) -> Option<(Url, Diagnostic)> {
+    if err.path.is_empty() || err.line == 0 {
+        return None;
+    }
+    let uri = Url::from_file_path(&err.path).ok()?;
+
+    let line = err.line - 1;
+    let start = err.span.saturating_sub(1);
+    let end = std::fs::read_to_string(&err.path)
+        .ok()
+        .and_then(|src| {
+            src.lines()
+                .nth(line as usize)
+                .map(|l| l.chars().count() as u32)
+        })
+        .filter(|&len| len > start)
+        .unwrap_or(start + 1);
+
+    let code = if err.code.is_empty() {
+        "E201"
+    } else {
+        &err.code
+    };
+    Some((
+        uri,
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line,
+                    character: start,
+                },
+                end: Position {
+                    line,
+                    character: end,
+                },
+            },
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String(code.to_string())),
+            source: Some("vale-ls".to_string()),
+            message: err.text.clone(),
+            ..Diagnostic::default()
+        },
+    ))
+}
+
 /// `metrics_summary` condenses Vale's metrics into a one-line code lens.
 pub(crate) fn metrics_summary(metrics: &serde_json::Map<String, serde_json::Value>) -> String {
     let count = |key: &str| metrics.get(key).and_then(|v| v.as_i64());
@@ -168,6 +217,39 @@ pub(crate) fn metrics_summary(metrics: &serde_json::Map<String, serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn errors_land_on_their_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let ini = dir.path().join(".vale.ini");
+        std::fs::write(
+            &ini,
+            "StylesPath = styles\n\n[*.md]\nBasedOnStyles = Vale, Nope\n",
+        )
+        .unwrap();
+
+        let err = vale::ValeError {
+            path: ini.display().to_string(),
+            text: "Style 'Nope' isn't on the StylesPath.".to_string(),
+            line: 4,
+            span: 23,
+            code: "E201".to_string(),
+        };
+        let (uri, d) = error_to_diagnostic(&err).unwrap();
+        assert_eq!(uri, Url::from_file_path(&ini).unwrap());
+        assert_eq!((d.range.start.line, d.range.start.character), (3, 22));
+        assert_eq!(d.range.end.character, 26);
+        assert_eq!(d.code, Some(NumberOrString::String("E201".to_string())));
+
+        let runtime = vale::ValeError {
+            path: String::new(),
+            text: "one argument expected".to_string(),
+            line: 0,
+            span: 0,
+            code: "E100".to_string(),
+        };
+        assert!(error_to_diagnostic(&runtime).is_none());
+    }
 
     #[test]
     fn summary() {

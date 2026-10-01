@@ -37,6 +37,7 @@ async fn main() {
         param_map: DashMap::new(),
         cli: ValeManager::with_custom_exe(args.vale_binary),
         versions: Arc::new(DashMap::new()),
+        config_errors: Arc::new(DashMap::new()),
     })
     .finish();
 

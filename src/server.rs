@@ -31,6 +31,9 @@ pub struct Backend {
     /// The newest version we've seen of each open document, so that a
     /// debounced lint can tell whether it's already been superseded.
     pub versions: Arc<DashMap<String, i32>>,
+    /// The files we've placed a Vale error on -- a `.vale.ini` or a rule --
+    /// so the next clean lint can clear it.
+    pub config_errors: Arc<DashMap<String, ()>>,
 }
 
 #[tower_lsp::async_trait]
@@ -421,6 +424,7 @@ impl Backend {
         self.versions.insert(uri.to_string(), version);
 
         let versions = self.versions.clone();
+        let config_errors = self.config_errors.clone();
         let client = self.client.clone();
         let cli = self.vale();
         let config_path = self.config_path();
@@ -452,6 +456,8 @@ impl Backend {
                         .map(utils::alert_to_diagnostic)
                         .collect();
 
+                    Self::clear_errors(&client, &config_errors).await;
+
                     // Still current? The lint itself takes time, too.
                     if versions.get(uri.as_str()).map(|v| *v) == Some(version) {
                         client
@@ -463,6 +469,11 @@ impl Backend {
                     client
                         .log_message(MessageType::ERROR, format!("Parsing error: {:?}", e))
                         .await;
+                    // No popup while typing: the error waits where it was
+                    // placed, and a save still announces it.
+                    if let Some(parsed) = vale::ValeError::parse(&e.to_string()) {
+                        Self::place_error(&client, &config_errors, &parsed).await;
+                    }
                 }
             }
         });
@@ -487,6 +498,7 @@ impl Backend {
                             diagnostics.push(utils::alert_to_diagnostic(alert));
                         }
                     }
+                    Self::clear_errors(&self.client, &self.config_errors).await;
                     self.client
                         .publish_diagnostics(uri.clone(), diagnostics, None)
                         .await;
@@ -495,12 +507,13 @@ impl Backend {
                     self.client
                         .log_message(MessageType::ERROR, format!("Parsing error: {:?}", err))
                         .await;
-                    match serde_json::from_str::<vale::ValeError>(&err.to_string()) {
-                        Ok(parsed) => {
+                    match vale::ValeError::parse(&err.to_string()) {
+                        Some(parsed) => {
+                            Self::place_error(&self.client, &self.config_errors, &parsed).await;
                             self.client.show_message(MessageType::ERROR, parsed).await;
                         }
-                        Err(e) => {
-                            self.client.show_message(MessageType::ERROR, e).await;
+                        None => {
+                            self.client.show_message(MessageType::ERROR, err).await;
                         }
                     };
                 }
@@ -548,6 +561,29 @@ impl Backend {
                         .log_message(MessageType::ERROR, err.to_string())
                         .await;
                 }
+            }
+        }
+    }
+
+    /// `place_error` publishes an error Vale placed in a file as a
+    /// diagnostic there, and remembers the file so a clean lint can clear it.
+    async fn place_error(client: &Client, placed: &DashMap<String, ()>, err: &vale::ValeError) {
+        if let Some((uri, diagnostic)) = utils::error_to_diagnostic(err) {
+            placed.insert(uri.to_string(), ());
+            client
+                .publish_diagnostics(uri, vec![diagnostic], None)
+                .await;
+        }
+    }
+
+    /// `clear_errors` removes what `place_error` published: the
+    /// configuration loaded, so whatever was wrong with it is fixed.
+    async fn clear_errors(client: &Client, placed: &DashMap<String, ()>) {
+        let uris: Vec<String> = placed.iter().map(|e| e.key().clone()).collect();
+        for key in uris {
+            placed.remove(&key);
+            if let Ok(uri) = Url::parse(&key) {
+                client.publish_diagnostics(uri, vec![], None).await;
             }
         }
     }
