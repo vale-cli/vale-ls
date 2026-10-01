@@ -1,8 +1,12 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use clap::Parser;
 use dashmap::DashMap;
+use tower::Service;
+use tower_lsp::jsonrpc::{Request, Response};
 use tower_lsp::{LspService, Server};
 
 use vale_ls::server::Backend;
@@ -36,5 +40,43 @@ async fn main() {
     })
     .finish();
 
+    let service = ExitOnExit {
+        inner: service,
+        shut_down: Arc::new(AtomicBool::new(false)),
+    };
     Server::new(stdin, stdout, socket).serve(service).await;
+}
+
+/// Exits the process on `exit`: 0 after `shutdown`, 1 without one, as the
+/// spec asks. tower-lsp's `serve` only returns once stdin closes, so a client
+/// that sends `exit` but keeps stdin open would wait on the server forever.
+struct ExitOnExit<S> {
+    inner: S,
+    shut_down: Arc<AtomicBool>,
+}
+
+impl<S> Service<Request> for ExitOnExit<S>
+where
+    S: Service<Request, Response = Option<Response>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: Request) -> Self::Future {
+        match req.method() {
+            "shutdown" => self.shut_down.store(true, Ordering::SeqCst),
+            "exit" => std::process::exit(if self.shut_down.load(Ordering::SeqCst) {
+                0
+            } else {
+                1
+            }),
+            _ => {}
+        }
+        self.inner.call(req)
+    }
 }
