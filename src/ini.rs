@@ -9,6 +9,16 @@ use crate::pkg;
 use crate::styles::StylesPath;
 use crate::utils;
 
+/// The names Vale accepts for a project's config file, including
+/// `.config/vale.ini`.
+const CONFIG_NAMES: [&str; 5] = [".vale.ini", "_vale.ini", "vale.ini", ".vale", "_vale"];
+
+/// `is_config` reports whether `path` names a Vale config file.
+pub fn is_config(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or("");
+    CONFIG_NAMES.contains(&name)
+}
+
 pub fn key_to_info(key: &str) -> Option<&str> {
     // A section header is a token in its own right -- `[formats]` -- so the
     // brackets come along with it.
@@ -151,4 +161,25 @@ fn block_tags() -> Vec<CompletionItem> {
             ..CompletionItem::default()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_names() {
+        for path in [
+            "/a/.vale.ini",
+            "/a/_vale.ini",
+            "/a/vale.ini",
+            "/a/.vale",
+            "/a/.config/vale.ini",
+        ] {
+            assert!(is_config(path), "{path}");
+        }
+        for path in ["/a/README.md", "/a/.vale.ini.bak", "/a/vale/W.yml"] {
+            assert!(!is_config(path), "{path}");
+        }
+    }
 }

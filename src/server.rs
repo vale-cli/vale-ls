@@ -782,7 +782,7 @@ impl Backend {
 
     fn get_ext(&self, uri: Url) -> String {
         let ext = uri.path().split('.').last().unwrap_or("");
-        if uri.path().contains(".vale.ini") {
+        if ini::is_config(uri.path()) {
             return "ini".to_string();
         } else if ext == "yml" {
             let config = self.vale().config(self.config_path(), self.root_for(&uri));

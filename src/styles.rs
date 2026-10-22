@@ -106,6 +106,21 @@ impl StylesPath {
             dir = root.join("Vocab").join(name);
         }
 
+        // A YAML vocabulary takes the term when its list can be edited in
+        // place; otherwise the term goes to the `.txt` file Vale also reads.
+        for file in ["vocab.yml", "vocab.yaml"] {
+            let yml = dir.join(file);
+            if yml.is_file() {
+                let content = fs::read_to_string(&yml)?;
+                let key = if accept { "accept" } else { "reject" };
+                if let Some(updated) = add_to_yaml_list(&content, key, term) {
+                    fs::write(yml, updated)?;
+                    return Ok(());
+                }
+                break;
+            }
+        }
+
         let path = dir.join(if accept { "accept.txt" } else { "reject.txt" });
 
         // Vale creates these on `sync`, but a project may have a vocabulary
@@ -201,6 +216,121 @@ impl StylesPath {
     }
 }
 
+/// `add_to_yaml_list` returns `content` with `term` appended to its
+/// top-level `key` list, keeping comments and order, or `None` when the list
+/// is in flow style (`[a, b]`), which this doesn't edit.
+fn add_to_yaml_list(content: &str, key: &str, term: &str) -> Option<String> {
+    let header = format!("{key}:");
+    let item = format!("- {}", yaml_scalar(term));
+    let mut lines: Vec<String> = content.lines().map(String::from).collect();
+
+    // The key's own line, which may carry a comment or an empty flow list.
+    let start = lines.iter().position(|l| {
+        l.strip_prefix(&header).is_some_and(|rest| {
+            let rest = rest.trim();
+            rest.is_empty() || rest.starts_with('#') || rest == "[]"
+        })
+    });
+
+    let Some(start) = start else {
+        if lines.iter().any(|l| l.starts_with(&header)) {
+            return None;
+        }
+        lines.push(header);
+        lines.push(format!("  {item}"));
+        return Some(lines.join("\n") + "\n");
+    };
+
+    if lines[start].trim_end().ends_with("[]") {
+        lines[start] = header;
+        lines.insert(start + 1, format!("  {item}"));
+        return Some(lines.join("\n") + "\n");
+    }
+
+    // The list runs until the next line at column 0 that isn't an item or
+    // a comment.
+    let mut last = start;
+    let mut indent = String::from("  ");
+    let mut found_item = false;
+    for (i, line) in lines.iter().enumerate().skip(start + 1) {
+        let trimmed = line.trim_start();
+        let top_level = trimmed.len() == line.len();
+        if !trimmed.is_empty()
+            && top_level
+            && !trimmed.starts_with('-')
+            && !trimmed.starts_with('#')
+        {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("- ") {
+            if !found_item {
+                indent = line[..line.len() - trimmed.len()].to_string();
+                found_item = true;
+            }
+            if entry_term(value) == term {
+                return Some(content.to_string());
+            }
+        }
+        if !trimmed.is_empty() && !(top_level && trimmed.starts_with('#')) {
+            last = i;
+        }
+    }
+
+    lines.insert(last + 1, format!("{indent}{item}"));
+    Some(lines.join("\n") + "\n")
+}
+
+/// `yaml_scalar` returns `term` as a YAML scalar, quoted when YAML would
+/// otherwise read it as something else.
+fn yaml_scalar(term: &str) -> String {
+    let special = term.is_empty()
+        || term.trim() != term
+        || term.contains(": ")
+        || term.contains(" #")
+        || term.ends_with(':')
+        || term.starts_with(|c| "-?:,[]{}#&*!|>'\"%@`".contains(c))
+        || ["true", "false", "yes", "no", "null", "on", "off", "~"]
+            .contains(&term.to_lowercase().as_str());
+    if special {
+        format!("'{}'", term.replace('\'', "''"))
+    } else {
+        term.to_string()
+    }
+}
+
+/// `entry_term` returns the term of a list item's text: a bare or quoted
+/// term, or the key of a term mapped to its options (`term: {flags: S}`).
+fn entry_term(item: &str) -> String {
+    let item = item.trim();
+    for quote in ['\'', '"'] {
+        if let Some(rest) = item.strip_prefix(quote) {
+            let end = if quote == '\'' {
+                // A doubled quote is an escaped one.
+                let mut i = 0;
+                let bytes = rest.as_bytes();
+                loop {
+                    match rest[i..].find('\'') {
+                        Some(j) if bytes.get(i + j + 1) == Some(&b'\'') => i += j + 2,
+                        Some(j) => break i + j,
+                        None => break rest.len(),
+                    }
+                }
+            } else {
+                rest.find('"').unwrap_or(rest.len())
+            };
+            let text = &rest[..end];
+            return if quote == '\'' {
+                text.replace("''", "'")
+            } else {
+                text.to_string()
+            };
+        }
+    }
+    let item = item.split(" #").next().unwrap_or("");
+    let key = item.split(": ").next().unwrap_or(item);
+    key.strip_suffix(':').unwrap_or(key).trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +413,95 @@ mod tests {
         assert_eq!(
             fs::read_to_string(vocab.join("reject.txt")).unwrap(),
             "nope\n"
+        );
+    }
+
+    #[test]
+    fn add_to_vocab_appends_to_a_yaml_vocabulary() {
+        let dir = tempfile::tempdir().unwrap();
+        let vocab = dir.path().join("config").join("vocabularies").join("Proj");
+        fs::create_dir_all(&vocab).unwrap();
+        fs::write(
+            vocab.join("vocab.yml"),
+            "# Our terms.\naccept:\n  - beta   # keep\n  - Gamma:\n      ignorecase: true\n  - failover: {flags: S}\n\nreject:\n  - k8s\n",
+        )
+        .unwrap();
+
+        let p = StylesPath::new(vec![dir.path().to_path_buf()]);
+        p.add_to_accept("Proj", "alpha").unwrap();
+        p.add_to_accept("Proj", "C: drive").unwrap();
+        p.add_to_reject("Proj", "nope").unwrap();
+
+        // Appended in place: comments, order, and other entries survive.
+        assert_eq!(
+            fs::read_to_string(vocab.join("vocab.yml")).unwrap(),
+            "# Our terms.\naccept:\n  - beta   # keep\n  - Gamma:\n      ignorecase: true\n  - failover: {flags: S}\n  - alpha\n  - 'C: drive'\n\nreject:\n  - k8s\n  - nope\n"
+        );
+
+        // A term already listed, bare or with options, is a no-op.
+        p.add_to_accept("Proj", "beta").unwrap();
+        p.add_to_accept("Proj", "Gamma").unwrap();
+        p.add_to_accept("Proj", "failover").unwrap();
+        p.add_to_accept("Proj", "C: drive").unwrap();
+        assert_eq!(
+            fs::read_to_string(vocab.join("vocab.yml"))
+                .unwrap()
+                .matches("Gamma")
+                .count(),
+            1
+        );
+        assert!(!vocab.join("accept.txt").exists());
+    }
+
+    #[test]
+    fn add_to_yaml_list_handles_each_shape() {
+        // No key yet.
+        assert_eq!(
+            add_to_yaml_list("reject:\n  - k8s\n", "accept", "alpha").unwrap(),
+            "reject:\n  - k8s\naccept:\n  - alpha\n"
+        );
+        // An empty flow list.
+        assert_eq!(
+            add_to_yaml_list("accept: []\n", "accept", "alpha").unwrap(),
+            "accept:\n  - alpha\n"
+        );
+        // Items at the key's own indentation.
+        assert_eq!(
+            add_to_yaml_list("accept:\n- beta\nreject:\n- k8s\n", "accept", "alpha").unwrap(),
+            "accept:\n- beta\n- alpha\nreject:\n- k8s\n"
+        );
+        // A flow list with items isn't edited.
+        assert!(add_to_yaml_list("accept: [beta]\n", "accept", "alpha").is_none());
+    }
+
+    #[test]
+    fn entry_term_reads_each_shape() {
+        assert_eq!(entry_term("beta"), "beta");
+        assert_eq!(entry_term("beta   # keep"), "beta");
+        assert_eq!(entry_term("Gamma:"), "Gamma");
+        assert_eq!(entry_term("failover: {flags: S}"), "failover");
+        assert_eq!(entry_term("'C: drive'"), "C: drive");
+        assert_eq!(entry_term("'it''s': {ignorecase: true}"), "it's");
+        assert_eq!(entry_term("\"[Pp]ython\": {regex: true}"), "[Pp]ython");
+    }
+
+    #[test]
+    fn add_to_vocab_falls_back_from_a_flow_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let vocab = dir.path().join("config").join("vocabularies").join("Proj");
+        fs::create_dir_all(&vocab).unwrap();
+        fs::write(vocab.join("vocab.yml"), "accept: [beta]\n").unwrap();
+
+        let p = StylesPath::new(vec![dir.path().to_path_buf()]);
+        p.add_to_accept("Proj", "alpha").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(vocab.join("vocab.yml")).unwrap(),
+            "accept: [beta]\n"
+        );
+        assert_eq!(
+            fs::read_to_string(vocab.join("accept.txt")).unwrap(),
+            "alpha\n"
         );
     }
 
