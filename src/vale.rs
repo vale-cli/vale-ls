@@ -293,13 +293,22 @@ impl ValeManager {
             .stderr(Stdio::piped())
             .spawn()?;
 
-        child
+        // The child is waited on before any error returns: a dropped `Child`
+        // is never reaped, so an early return here leaves a zombie for the
+        // life of the server. Vale exiting before it reads all of stdin (a
+        // config error, for one) fails the write with a broken pipe; its own
+        // output then explains why, so that output is what gets parsed.
+        let written = child
             .stdin
             .take()
-            .ok_or_else(|| Error::from("Failed to open Vale's stdin."))?
-            .write_all(text.as_bytes())?;
+            .map(|mut stdin| stdin.write_all(text.as_bytes()));
+        let output = child.wait_with_output()?;
 
-        self.parse_output(child.wait_with_output()?)
+        match written {
+            None => Err(Error::from("Failed to open Vale's stdin.")),
+            Some(Err(e)) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+            Some(_) => self.parse_output(output),
+        }
     }
 
     /// `run` executes Vale over a file on disk.
@@ -632,6 +641,47 @@ mod tests {
             .install_or_update()
             .unwrap()
             .contains("skipping install"));
+    }
+
+    // Vale exiting before it reads stdin breaks the pipe under a buffer larger
+    // than the pipe holds. The child must still be reaped, and its own error
+    // is what comes back rather than the broken pipe.
+    #[cfg(unix)]
+    #[test]
+    fn child_is_reaped_when_stdin_breaks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let exe = dir.path().join("vale");
+        std::fs::write(
+            &exe,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\necho '{{\"Line\":1,\"Path\":\"\",\"Text\":\"boom\",\"Code\":\"E100\",\"Span\":0}}' >&2\nexit 2\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mgr = ValeManager::new().pinned_to(Some(exe));
+        let text = "x".repeat(1 << 20);
+        let err = mgr
+            .run_buffer(text, dir.path().join("a.md"), String::new(), String::new())
+            .unwrap_err();
+
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let state = Command::new("ps")
+            .args(["-o", "stat=", "-p", pid.trim()])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&state.stdout);
+        assert!(
+            !state.trim_start().starts_with('Z'),
+            "child {} left as a zombie",
+            pid.trim()
+        );
+        assert!(err.to_string().contains("boom"), "got {}", err);
     }
 
     #[test]
